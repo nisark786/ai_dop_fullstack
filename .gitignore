@@ -1,0 +1,50 @@
+# Environment variables and secrets (Strict zero-secrets rule)
+.env
+.env.*
+!.env.example
+*.env
+**/.env
+**/.env.*
+!**/.env.example
+
+# Dependencies & environments
+.venv/
+**/.venv/
+node_modules/
+**/node_modules/
+.pnpm-store/
+**/.pnpm-store/
+dist/
+dist-ssr/
+build/
+*.egg-info/
+__pycache__/
+**/__pycache__/
+*.py[oc]
+
+# Caches & Test output
+.ruff_cache/
+**/.ruff_cache/
+.pytest_cache/
+**/.pytest_cache/
+
+# Local database files
+*.db
+*.sqlite
+*.sqlite3
+**/schoolpath_dev.db
+
+# Scratch & temporary inspection dumps
+scratch/
+**/scratch/
+
+# Logs
+*.log
+logs/
+
+# Operating system & IDE files
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.sw?

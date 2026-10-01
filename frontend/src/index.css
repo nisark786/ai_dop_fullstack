@@ -1,0 +1,157 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    margin: 0;
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: #F5F7FB;
+    color: #0F172A;
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* Prototype Design System Tokens & Components */
+.card {
+  background: #ffffff;
+  border: 1px solid #E2E8F0;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
+}
+
+.ch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid #EEF2F7;
+  font-weight: 600;
+  color: #0A1F3C;
+  font-size: 14px;
+}
+
+.cb {
+  padding: 20px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  white-space: nowrap;
+}
+
+.chip-verified, .chip-ready {
+  background: #DCFCE7;
+  color: #166534;
+}
+
+.chip-review, .chip-processing {
+  background: #FEF3C7;
+  color: #92400E;
+}
+
+.chip-invalid, .chip-failed {
+  background: #FEE2E2;
+  color: #B91C1C;
+}
+
+.chip-neutral {
+  background: #EEF2F8;
+  color: #0A1F3C;
+}
+
+.drop {
+  border: 2px dashed #93A4C0;
+  border-radius: 12px;
+  background: #F8FAFF;
+  padding: 36px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  transition: all 0.15s ease-in-out;
+}
+
+.drop:hover {
+  border-color: #2563EB;
+  background: #EFF6FF;
+}
+
+.file-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #F1F5F9;
+  border-radius: 10px;
+  padding: 12px 16px;
+  border: 1px solid #E2E8F0;
+}
+
+.why {
+  font-size: 12px;
+  color: #B91C1C;
+  margin-top: 4px;
+}
+
+.stack {
+  display: flex;
+  height: 22px;
+  border-radius: 8px;
+  overflow: hidden;
+  gap: 2px;
+  background: #EEF2F8;
+}
+
+.seg2 {
+  min-width: 6px;
+  height: 100%;
+}
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pill {
+  border: 1px solid #CBD5E1;
+  background: #ffffff;
+  color: #334155;
+  border-radius: 9999px;
+  padding: 5px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+
+.pill:hover {
+  background: #F1F5F9;
+}
+
+.pill.on {
+  background: #0A1F3C;
+  border-color: #0A1F3C;
+  color: #ffffff;
+}
+
+.bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  background: #0A1F3C;
+  color: #ffffff;
+  border-radius: 12px;
+  padding: 12px 18px;
+  box-shadow: 0 4px 14px rgba(10, 31, 60, 0.25);
+}

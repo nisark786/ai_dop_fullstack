@@ -1,0 +1,4 @@
+[flake8]
+max-line-length = 100
+extend-ignore = E501, B008, E712
+exclude = .venv, __pycache__, build, dist, alembic/versions
