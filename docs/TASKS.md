@@ -14,6 +14,7 @@ This document tracks all implementation tasks from start to finish. Each task is
 - [ ] **Milestone 6: Production Publishing & SchoolPath Sandbox Sync (FR-10.1 to FR-11.4)**
 - [ ] **Milestone 7: Source Authority & Input Registry (ERCIE Learning)**
 - [ ] **Milestone 8: Authentication & Role-Based Access Control (RBAC - JWT) (FR-1.1 to FR-1.3)** 👈 *MOVED TO LAST*
+- [x] **Milestone 14: Comprehensive Codebase Audit & Engineering Hardening**
 
 ---
 
@@ -80,12 +81,21 @@ Implement complete end-to-end Batch Intake & Management per Phase 1 FRD Section 
   - Streamlined `BatchDetailView.tsx` by removing "Run Metadata Agent" button, bulk agent dispatch modal, school-level audit play button, and the `MetadataAuditDrawer`, refocusing Batch Management purely on batch membership and school intake operations.
   - Zero breaking changes, verified with `uv run ruff check app` (0 errors) and `pnpm tsc -b` (0 errors).
 
-- [x] **Task 1.9: Enterprise Pydantic v2 Input Validation & Workspace Skill (`pydantic-validation`)**
-  - Created `.agents/skills/pydantic-validation/SKILL.md` and added **Rule 6: Input Validation & Pydantic Standards** in `AGENTS.md`.
-  - Upgraded all backend Pydantic schemas (`batch.py`, `school.py`) with `str_strip_whitespace=True`, string bounds, numeric bounds (`0.0 <= weight <= 100.0`), `Literal[...]` enum types, and `@model_validator(mode="after")` cross-field integrity checks.
-  - Replaced raw `dict` / `Body(...)` inputs in `sources.py`, `review.py`, and `jobs.py` with dedicated Pydantic request models (`SourceWeightUpdateRequest`, `ReviewCorrectRequest`, `JobCreateRequest`).
-  - Verified with 16 automated boundary/edge-case tests, `uv run ruff check app` (0 errors), and `pnpm tsc -b` (0 errors).
-
+- [x] **Task 1.10: Batch Management Hardening (Safety Guards, Cross-Store Synchronization & Operator UX)**
+  - **Safety & Data Integrity**:
+    - Guarded batch soft-deletion (`DELETE /api/batches/{id}`) and permanent deletion (`DELETE /api/batches/{id}/permanent`) against actively running crawler/extraction jobs with `HTTP 409 Conflict`.
+    - Implemented Orphan Guard on dropping schools (`drop_school_from_batch` and `bulk_drop_schools`): Automatically cancels pending `MetadataAgentOutputModel` verification records when a school is dropped.
+    - Updated Review endpoints (`/api/review/items/{id}/approve` and `/api/review/items/{id}/correct`) to reject review actions for dropped staging schools with `HTTP 410 Gone`.
+  - **State Synchronization & Performance**:
+    - Connected `useTrashStore` cross-invalidation inside `useBatchStore` so soft-delete and school drop operations instantly update the Trash Bucket badge and list without manual page reloads.
+    - Added passive 6-second auto-polling to `BatchListView` while any batch is in `processing` status to reflect agent background progress.
+    - Unified `CreateBatchView` batch creation through `useBatchStore.createBatch()` for consistent global store state.
+  - **Operator Workflow & UX Enhancements**:
+    - Added multi-school select checkboxes, header select-all, floating action bar, and bulk drop endpoint (`POST /api/batches/{id}/schools/bulk-drop`) with confirmation modal.
+    - Implemented client-side pagination (25 / 50 / 100 rows per page) in `BatchDetailView` to eliminate DOM lag on large batches.
+    - Added duplicate resolution master toggles in `CreateBatchView` Step 3 ("Set All to Link Existing" / "Set All to Create New").
+    - Added 1-click `[ Download Invalid Rows (.csv) ]` export generator on intake validation failures.
+  - Verified with 238 passing backend tests, `uv run ruff check app tests` (0 errors), `pnpm exec tsc -b` (0 errors), and `pnpm lint` (0 errors).
 
 ---
 
@@ -198,6 +208,21 @@ Implement complete end-to-end Batch Intake & Management per Phase 1 FRD Section 
   - Persist scraped markdown by SHA-256 URL hash in `scraped_pages_cache` with 14-day TTL.
   - Added on-demand "Bypass Scraper Cache (Force Fresh Live Scrape)" toggle in `AgentsOperateView.tsx` and `RunMetadataAgentModal.tsx`.
   - Propagated `force_refresh` parameter through API routes and `ExtractionAgent.scrape_website`.
+
+- [x] **Task 3.3: AI Agent Operations Hardening (Scoped Job Controls, Lifecycle & UX)**
+  - **Scoped Batch Isolation**:
+    - Introduced `_resolve_batch_for_job` helper to precisely bind `job_id` and optional `batch_id` to its target batch in `pause_agent_job`, `resume_agent_job`, and `cancel_agent_job`, eliminating global batch cross-contamination.
+    - Updated `POST /api/batches/{id}/run-metadata-agent` to filter out soft-deleted/dropped staging schools (`deleted_at.is_(None)`).
+    - Replaced all deprecated `datetime.utcnow()` occurrences with timezone-aware `datetime.now(UTC)`.
+  - **Batch Completion Lifecycle**:
+    - Enhanced `batch_agent_worker.py` post-execution status reconciliation: Checks remaining staging schools; transitions `batch.status = "completed"` once all schools reach terminal verification statuses.
+  - **Store Harmonization & Operator UX**:
+    - Refactored `useAgentStore.runAgentsForBatch` to accept multiple batch IDs atomically, deprecating the client-side sequential loop in `runAgentsForMultipleBatches`.
+    - Added cross-store invalidation to `useBatchStore.getState().fetchBatches()`.
+    - Added live elapsed duration formatting (`formatElapsed`) on active and completed job cards.
+    - Added stale run detection (> 15m) with 1-click **Force Reset** recovery action.
+    - Added direct **`[ Review Outputs → ]`** hero shortcut linking to `/review?batch_id=...` on completed jobs.
+  - Verified with 243 passing backend tests, `uv run ruff check app tests` (0 errors), `pnpm exec tsc -b` (0 errors), and `pnpm lint` (0 errors).
 
 ---
 
@@ -502,7 +527,168 @@ Resolve missing grades across batch intake, live crawling, and the human-in-the-
   - Backend Lint: `uv run ruff check app tests` (0 errors), `uv run ruff format app tests`.
   - Frontend: `pnpm exec tsc -b` (0 errors), `pnpm lint` (0 errors).
 
+## Milestone 14: Comprehensive Codebase Audit & Engineering Hardening
+
+### 🎯 Objective
+Remediate all 12 critical, high, and medium architectural, database safety, schema, performance, and code quality issues identified during the comprehensive multi-skill codebase audit. Ensure zero runtime 500 crashes, native cross-dialect portability, decoupled service architecture, and strict zero-hardcoded secrets enforcement.
+
+### 📋 Detailed Sub-Tasks:
+- [x] **Task 14.1: Security & Secrets Hardening (SEC-01, SEC-02)**
+  - Sanitized live Supabase connection string and password from `docs/DEVELOPER_GUIDE.md`.
+  - Purged hardcoded RDS password from scratch inspection scripts (`safe_inspect_qa.py`, `safe_qa_summary.py`), requiring `QA_DB_PASSWORD` via environment variables.
+- [x] **Task 14.2: Schema Alignment & Runtime Crash Resolution (BUG-01, BUG-02)**
+  - Aligned `SourceRegistryModel` with canonical columns (`source_name`, `domain_pattern`, `configured_weight`, `effective_weight`, etc.), resolving `/api/sources` HTTP 500 and updating tests to assert HTTP 200.
+  - Added indexed `review_status` column and boolean `conflict_detected` to `ResolvedValueModel`, resolving `/api/published` HTTP 500 and updating tests to assert HTTP 200.
+- [x] **Task 14.3: Database Safety & Cross-Dialect Portability (DB-01, DB-02, DB-03, DB-04)**
+  - Added PostgreSQL connection option `-c statement_timeout=5000` in `app/core/database.py` per DB Safety Rule 3.
+  - Upgraded master `Schools` ORM model to SQLAlchemy 2.0 `Uuid(as_uuid=True)` and `JSONB().with_variant(JSON, "sqlite")`.
+  - Deduplicated index on `status` in `StagingSchoolModel` and eliminated deprecated `datetime.utcnow()` across models and routes in favor of `datetime.now(UTC)`.
+  - Removed obsolete dialect monkeypatching and index deduplicating hacks from `tests/conftest.py`.
+- [x] **Task 14.4: Data Integrity, Query Optimization & Architectural Decoupling (LOG-01, LOG-02, PERF-01, ARCH-01, ARCH-02)**
+  - Fixed school name resolution in `runs.py` to inspect `StagingSchoolModel` when `school_id` is null, preventing `"Unknown School"`.
+  - Purged fake canned dates and heuristic grade guesses from `results.py`, returning authentic unextracted representations.
+  - Eliminated N+1 query loops in `review.py` via batch prefetching, reducing queries from 350+ to 4 constant roundtrips.
+  - Extracted 230-line multi-threaded worker into `app/services/agents/batch_agent_worker.py`, eliminating cross-router private imports between `batches.py` and `agents.py`.
+  - Converted model import shims to direct, explicit canonical imports across the codebase.
+- [x] **Task 14.5: Quality Gates & Verification**
+  - Backend: 233 passing tests (`uv run pytest`) in ~2.3 seconds.
+  - Backend Lint & Format: `uv run ruff check app tests` (0 errors), `uv run ruff format app tests`.
+  - Frontend: `pnpm tsc -b` (0 errors) and `pnpm lint` (0 errors).
+
 ---
 
-*Last Updated: 2026-10-01 • Maintained continuously per `docs-maintenance` & `task-tracking` standards*
+## Milestone 15: Subsystem Hardening (Batch Management, Agent Operations, Cost & Token Monitor)
+
+### 🎯 Objective
+Harden core pipeline subsystems against edge-case failures, state synchronization disconnects, unoptimized polling, missing entity name resolutions, and export omissions across Batch Management, Agent Operations, and Cost & Token Monitoring.
+
+### 📋 Detailed Sub-Tasks:
+
+- [x] **Task 15.1: Batch Management Hardening**
+  - Added active job deletion guard in `DELETE /api/batches/{id}` (blocks with HTTP 409 Conflict if batch is processing or running active crawl jobs).
+  - Cancelled orphan review queue items on dropping schools (`drop_school_from_batch`).
+  - Synced `useTrashStore` on batch delete and school drop actions.
+  - Added 6s passive polling in `BatchListView.tsx` when any batch is in processing state.
+  - Routed `CreateBatchView.tsx` batch confirmation through `useBatchStore.createBatch()`.
+  - Added bulk drop endpoint `POST /api/batches/{batch_id}/drop-schools` and multi-select UI in `BatchDetailView.tsx`.
+  - Added client-side pagination (25 schools/page) in `BatchDetailView.tsx`.
+  - Added master duplicate resolution toggles ("Set All to Link Existing", "Set All to Create New") in `CreateBatchView.tsx`.
+  - Added "Download Invalid Rows (.csv)" in intake upload preview on parse errors.
+
+- [x] **Task 15.2: AI Agent Operations Hardening**
+  - Implemented precise target batch isolation via `_resolve_batch_for_job` on pause, resume, and cancel actions.
+  - Filtered out soft-deleted (`deleted_at.is_not(None)`) staging schools when dispatching batch crawls.
+  - Implemented automatic transition to `batch.status = "completed"` upon crawl completion.
+  - Replaced deprecated `utcnow()` with timezone-aware `datetime.now(UTC)` across agent worker modules.
+  - Enabled atomic multi-batch dispatch in `useAgentStore.runAgentsForMultipleBatches`.
+  - Added live elapsed timer in `AgentsOperateView.tsx` during active crawls.
+  - Added direct link to Review Queue in active crawl cards.
+  - Added stale running job auto-detection with one-click force reset.
+
+- [x] **Task 15.3: Cost & Token Monitoring Hardening (GPT-6 Luna Dedicated)**
+  - Configured OpenAI proxy for GPT-6 Luna at \$0.10 / 1M input tokens and \$0.50 / 1M output tokens.
+  - Enhanced `GET /api/costs/summary` with `total_prompt_tokens`, `total_completion_tokens`, and `avg_duration_ms` latency metrics.
+  - Enhanced `GET /api/costs/invocations` with database name resolution (`batch_name`, `school_name`) and fuzzy batch search.
+  - Built streaming server-side CSV audit export `GET /api/costs/export`.
+  - Created dedicated Zustand store `useCostStore.ts` with atomic selectors and cached filter persistence.
+  - Implemented execution-aware smart polling in `CostMonitorView.tsx` (5s during active crawls, 30s when idle).
+  - Enhanced KPI cards with token composition percentages and average latency indicators.
+  - Verified with 246 backend pytests (100% pass), 0 Ruff lint errors, and 0 Oxlint/TypeScript errors.
+
+- [x] **Task 15.4: Approved Schools Queue Lifecycle Isolation (Excluding Published Records)**
+  - Updated `GET /api/review/schools?queue_type=approved` to strictly filter on `status == "approved"`, excluding promoted `"published"` records.
+  - Updated batch publishing in `POST /api/review/bulk-action` (`action == "publish"`) to target only pending `"approved"` schools.
+  - Updated `tests/api/test_review.py` to assert that published schools do not linger in the Approved queue once promoted to master production.
+  - Verified with all 246 backend tests passing and 0 frontend/backend lint errors.
+
+---
+
+## Milestone 16: AWS RDS PostgreSQL Sandbox Dual-Publishing Integration (`sdn_prod_sandbox`)
+
+### 🎯 Objective
+Integrate the external AWS RDS Sandbox database (`sdn_prod_sandbox`) into the SchoolPath publishing pipeline. When an operator approves and publishes schools from `/approved`, verified data is promoted locally to Supabase and simultaneously synced into RDS Sandbox (`public.schools`), touching **only active verified core fields** while strictly ignoring specialized curriculum and enrollment columns, and guaranteeing that all mutations are triggered **exclusively by human operators in the frontend UI**.
+
+### 📋 Detailed Sub-Tasks:
+
+- [x] **Task 16.1: Sandbox Target Configuration & Secrets Management**
+  - Added strongly-typed Sandbox configuration settings to `app.core.config.ApplicationSettings`: `sandbox_enabled`, `sandbox_host`, `sandbox_port`, `sandbox_database`, `sandbox_user`, `sandbox_password`, `sandbox_schema`, `sandbox_table`, and computed `sandbox_database_url`.
+  - Added safe placeholder values in `backend/.env.example` following zero-hardcoding standards.
+  - Configured live sandbox connection parameters in `backend/.env` with `sslmode=require`.
+
+- [x] **Task 16.2: Strict Field Scoping & Normalization Service**
+  - Built `app.services.sandbox_sync.normalizer`:
+    - Sanitizes active core fields: `name`, `website`, `address`, `phone`, `email`, `type`, `grades`, `description`, `is_active`.
+    - Automatically strips trailing `.0` artifacts from phone numbers.
+    - Serializes `type` and `grades` into clean JSON lists for PostgreSQL `jsonb` columns.
+    - **Strictly Ignored Fields**: Completely excludes `learning_models`, `extracurricular_programs`, `open_enrollment`, and `full_address` from Sandbox payloads.
+  - Added 5 unit tests in `tests/unit/test_sandbox_normalizer.py` verifying field isolation, phone sanitization, and placeholder stripping.
+
+- [x] **Task 16.3: Thread-Safe Connection Management & Fail-Safe Upsert Service**
+  - Built `app.services.sandbox_sync.sandbox_client`:
+    - Pooled singleton engine with `pool_size=5`, `max_overflow=5`, `pool_pre_ping=True`.
+    - Enforced query safety with `statement_timeout = 5000` ms on all Sandbox connections.
+  - Built `app.services.sandbox_sync.sync_service.SandboxSyncService`:
+    - Idempotent upsert matching by existing Sandbox UUID or `LOWER(name)`.
+    - Returns structured `SandboxSyncResult(status="synced"|"failed"|"disabled")`.
+    - Isolates network and database errors so failures never roll back local Supabase promotion.
+  - Added 5 service tests in `tests/services/test_sandbox_sync_service.py` verifying insert, update, disabled, missing name, and network error handling with mocked engines.
+
+- [x] **Task 16.4: Promotion Service Wiring & Operator Retry Endpoint**
+  - Wired `SandboxSyncService.sync_school` into `SchoolPromotionService.promote_staging_school` (`app/services/promotion/school_promotion_service.py`).
+  - Recorded sync provenance in `staging.metadata_json["sandbox_sync"]`.
+  - Added Pydantic schemas in `app.schemas.review`: `SandboxSyncInfoSchema` and `SandboxSyncStatusResponse` with `ConfigDict(str_strip_whitespace=True)`.
+  - Added operator retry endpoint `POST /api/review/schools/{id}/retry-sandbox-sync` in `app/api/routes/review.py`.
+  - Added 3 integration tests in `tests/api/test_review.py` testing invalid UUID, 404, and successful retry updating `metadata_json`.
+
+- [x] **Task 16.5: Frontend UI Visibility & 1-Click Retry Controls**
+  - Added `SandboxSyncInfo` to `frontend/src/types/index.ts` and updated `VerificationSchoolItem` and `PublishedRecord`.
+  - Added `retrySandboxSync(schoolId)` in `frontend/src/services/api.ts`.
+  - Enhanced `ApprovedSchoolsView.tsx` with `● Sandbox Synced` and `● Sandbox Failed` status badges.
+  - Enhanced `PublishedDataView.tsx` with dedicated **Sandbox Sync** column displaying green `Sandbox Synced` pills (with Sandbox UUID hover tooltip) and red `Sandbox Failed` pills with 1-click **`[ ↺ Retry Sandbox Sync ]`** button.
+  - Toast notifications directly communicate Sandbox sync results (`(Sandbox: X synced, Y failed)`).
+
+- [x] **Task 16.6: Quality Gates & Verification**
+  - Backend: 259 passing tests (`uv run pytest`) with 0 failures in 15.57s.
+  - Backend Lint & Format: `uv run ruff check app tests` (0 errors), `uv run ruff format --check app tests` (95 files already formatted).
+  - Frontend: `pnpm exec tsc -b` (0 errors) and `pnpm lint` (0 errors).
+  - Documentation: Updated `docs/DEVELOPER_GUIDE.md` Section 6.16 and `docs/TASKS.md` Milestone 16.
+
+---
+
+## Milestone 17: Full Frontend-to-Backend API Contract Audit & School CRUD Completion
+
+### 🎯 Objective
+Perform an exhaustive automated audit comparing all 56 API client requests invoked across frontend pages, stores, and modals against the 64 backend OpenAPI routes. Resolve any missing endpoints, eliminating HTTP 405 Method Not Allowed errors when editing or creating schools.
+
+### 📋 Detailed Sub-Tasks:
+
+- [x] **Task 17.1: Comprehensive Endpoint Contract Audit**
+  - Audited all 56 `apiClient` calls in `frontend/src/services/api.ts` against the live FastAPI OpenAPI schema.
+  - Identified exactly two missing endpoints:
+    1. `PATCH /api/schools/{school_id}` (triggered by `EditSchoolModal.tsx`, `SchoolLibraryView.tsx` active toggle, and bulk toggle).
+    2. `POST /api/schools` (triggered by `CreateSchoolModal.tsx` manual enrollment).
+  - Confirmed 54 of 56 endpoints had 100% path and method parity across Jobs, Review, Batches, Agents, Costs, Runs, and Results.
+
+- [x] **Task 17.2: Backend Route Implementation**
+  - Implemented `PATCH /api/schools/{school_id}` in `backend/app/api/routes/schools.py`:
+    - Backed by strictly-typed `SchoolUpdateSchema` with Pydantic v2 `ConfigDict(str_strip_whitespace=True)`.
+    - Updates provided attributes on master production `Schools` or falls back to `StagingSchoolModel` if a staging UUID was passed.
+    - Synchronizes canonical address and full address, returning updated `SchoolResponseSchema`.
+  - Implemented `POST /api/schools` in `backend/app/api/routes/schools.py`:
+    - Backed by `SchoolCreateSchema` with Pydantic v2 validation.
+    - Provisions defaults for all 20+ non-nullable database columns and returns `201 Created`.
+
+- [x] **Task 17.3: Quality Gates & End-to-End Verification**
+  - Re-ran endpoint contract audit: verified **0 mismatched or missing endpoints (100% matched)**.
+  - Backend: **265 passing tests** (`uv run pytest`) with 0 failures in 13.51s (added 6 unit tests in `TestSchoolCreateAndUpdate`).
+  - Backend Lint & Format: `uv run ruff check app tests` (0 errors), `uv run ruff format --check app tests` (95 files formatted).
+  - Frontend: `pnpm exec tsc -b` (0 errors) and `pnpm lint` (0 errors across 59 files).
+  - Documentation: Synchronized `docs/DEVELOPER_GUIDE.md` Section 6.8 and `docs/TASKS.md` Milestone 17.
+
+---
+
+*Last Updated: 2026-10-15 • Maintained continuously per `docs-maintenance` & `task-tracking` standards*
+
+
+
 

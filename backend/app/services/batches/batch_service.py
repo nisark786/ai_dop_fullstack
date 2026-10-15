@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.batch import BatchModel, BatchSchoolModel
+from app.models.metadata_output import MetadataAgentOutputModel
 from app.models.schools import Schools
 from app.models.staging_school import StagingSchoolModel
 from app.schemas.batch import (
@@ -288,13 +289,31 @@ class BatchService:
         if not batch:
             raise ValueError(f"Batch with id {batch_id} not found")
 
-        batch.deleted_at = datetime.utcnow()
+        active_staging_jobs = (
+            db.query(StagingSchoolModel)
+            .filter(
+                StagingSchoolModel.batch_id == batch_id,
+                StagingSchoolModel.deleted_at.is_(None),
+                StagingSchoolModel.status.in_(["crawling", "running", "extracting"]),
+            )
+            .count()
+        )
+        if active_staging_jobs > 0 or batch.status in ("processing", "running"):
+            raise ValueError(
+                "Cannot delete batch while crawling jobs are actively running. Pause or cancel jobs first."
+            )
+
+        now = datetime.now(UTC)
+        batch.deleted_at = now
         batch.status = "trashed"
-        batch.updated_at = datetime.utcnow()
+        batch.updated_at = now
         db.commit()
         db.refresh(batch)
 
-        now = datetime.utcnow()
+        del_at = batch.deleted_at
+        if del_at and del_at.tzinfo is None:
+            del_at = del_at.replace(tzinfo=UTC)
+
         return BatchSummaryItem(
             id=batch.id,
             name=batch.name,
@@ -306,7 +325,7 @@ class BatchService:
             created_at=batch.created_at,
             updated_at=batch.updated_at,
             deleted_at=batch.deleted_at,
-            days_remaining=max(0, 30 - (now - batch.deleted_at).days) if batch.deleted_at else None,
+            days_remaining=max(0, 30 - (now - del_at).days) if del_at else None,
         )
 
     @staticmethod
@@ -315,9 +334,10 @@ class BatchService:
         if not batch:
             raise ValueError(f"Batch with id {batch_id} not found")
 
+        now = datetime.now(UTC)
         batch.deleted_at = None
         batch.status = "ready"
-        batch.updated_at = datetime.utcnow()
+        batch.updated_at = now
         db.commit()
         db.refresh(batch)
 
@@ -340,6 +360,20 @@ class BatchService:
         batch = db.query(BatchModel).filter(BatchModel.id == batch_id).first()
         if not batch:
             raise ValueError(f"Batch with id {batch_id} not found")
+
+        active_staging_jobs = (
+            db.query(StagingSchoolModel)
+            .filter(
+                StagingSchoolModel.batch_id == batch_id,
+                StagingSchoolModel.deleted_at.is_(None),
+                StagingSchoolModel.status.in_(["crawling", "running", "extracting"]),
+            )
+            .count()
+        )
+        if active_staging_jobs > 0 or batch.status in ("processing", "running"):
+            raise ValueError(
+                "Cannot delete batch while crawling jobs are actively running. Pause or cancel jobs first."
+            )
 
         db.delete(batch)
         db.commit()
@@ -451,6 +485,18 @@ class BatchService:
             staging.deleted_at = now
             staging.updated_at = now
             db.flush()
+
+            # Orphan Guard: cancel pending/unreviewed metadata agent outputs
+            db.query(MetadataAgentOutputModel).filter(
+                MetadataAgentOutputModel.staging_school_id == staging.id,
+                MetadataAgentOutputModel.verification_status.in_(
+                    ["needs_review", "pending", "invalid"]
+                ),
+            ).update(
+                {"verification_status": "cancelled"},
+                synchronize_session=False,
+            )
+
             current_count = (
                 db.query(StagingSchoolModel)
                 .filter(
@@ -486,13 +532,87 @@ class BatchService:
             db.query(BatchSchoolModel).filter(BatchSchoolModel.batch_id == batch_id).count()
         )
         batch.school_count = max(0, current_count - 1)
-        batch.updated_at = datetime.utcnow()
+        batch.updated_at = datetime.now(UTC)
         db.commit()
 
         return {
             "message": "School successfully dropped from batch",
             "batch_id": batch_id,
             "school_id": str(school_id),
+            "remaining_schools": batch.school_count,
+        }
+
+    @staticmethod
+    def bulk_drop_schools(db: Session, batch_id: str, school_ids: list[str]) -> dict[str, Any]:
+        batch = db.query(BatchModel).filter(BatchModel.id == batch_id).first()
+        if not batch:
+            raise ValueError(f"Batch with id {batch_id} not found")
+
+        now = datetime.now(UTC)
+        dropped_count = 0
+
+        # 1. Soft-delete staging schools
+        staging_schools = (
+            db.query(StagingSchoolModel)
+            .filter(
+                StagingSchoolModel.batch_id == batch_id,
+                StagingSchoolModel.id.in_(school_ids),
+                StagingSchoolModel.deleted_at.is_(None),
+            )
+            .all()
+        )
+
+        dropped_staging_ids = []
+        for st in staging_schools:
+            st.deleted_at = now
+            st.updated_at = now
+            dropped_staging_ids.append(st.id)
+            dropped_count += 1
+
+        if dropped_staging_ids:
+            # Orphan Guard: cancel pending/unreviewed metadata agent outputs
+            db.query(MetadataAgentOutputModel).filter(
+                MetadataAgentOutputModel.staging_school_id.in_(dropped_staging_ids),
+                MetadataAgentOutputModel.verification_status.in_(
+                    ["needs_review", "pending", "invalid"]
+                ),
+            ).update(
+                {"verification_status": "cancelled"},
+                synchronize_session=False,
+            )
+
+        # 2. Also handle legacy batch_schools membership if any
+        legacy_memberships = (
+            db.query(BatchSchoolModel)
+            .filter(
+                BatchSchoolModel.batch_id == batch_id,
+                BatchSchoolModel.school_id.in_(school_ids),
+            )
+            .all()
+        )
+        for lm in legacy_memberships:
+            db.delete(lm)
+            dropped_count += 1
+
+        db.flush()
+
+        # Recalculate remaining school count
+        rem_staging = (
+            db.query(StagingSchoolModel)
+            .filter(
+                StagingSchoolModel.batch_id == batch_id,
+                StagingSchoolModel.deleted_at.is_(None),
+            )
+            .count()
+        )
+        batch.school_count = rem_staging
+        batch.updated_at = now
+        db.commit()
+
+        return {
+            "message": f"Successfully dropped {dropped_count} school(s) from batch",
+            "batch_id": batch_id,
+            "dropped_count": dropped_count,
             "remaining_schools": batch.school_count,
         }
 

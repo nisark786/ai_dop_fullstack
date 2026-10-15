@@ -22,9 +22,13 @@ from sqlalchemy.orm import Session
 
 from app.models.batch import BatchModel
 from app.models.cost import OpenAICostLogModel
-from app.models.job import CrawlJobModel
 from app.models.metadata_output import MetadataAgentOutputModel
-from app.models.pipeline import EvidenceRecordModel, ResolvedValueModel, SourceRegistryModel
+from app.models.pipeline import (
+    CrawlJobModel,
+    EvidenceRecordModel,
+    ResolvedValueModel,
+    SourceRegistryModel,
+)
 from app.models.prompt_template import PromptTemplateModel
 from app.models.schools import Schools
 from app.models.staging_school import StagingSchoolModel
@@ -243,25 +247,38 @@ def make_source_registry(
     db: Session,
     *,
     source_id: str | None = None,
+    source_name: str = "Official School Portal",
     domain: str = "school.edu",
+    domain_pattern: str | None = None,
+    category: str = "Category 1 — Official School",
     source_tier: str = "Tier 1 - Official School Website",
+    configured_weight: float = 100.0,
+    effective_weight: float = 95.0,
     base_weight: float = 0.9,
+    approved_count: int = 19,
+    corrected_count: int = 1,
+    rejected_count: int = 0,
+    total_reviews: int = 20,
+    historical_accuracy: float = 95.0,
     description: str | None = "Official school portal",
-    is_active: str = "true",
+    is_active: bool = True,
 ) -> SourceRegistryModel:
-    """
-    Insert and return a SourceRegistryModel record.
-
-    Note: The ORM model has columns: id, domain, source_tier, base_weight,
-    description, is_active.  The sources.py route references additional
-    attributes (source_name, domain_pattern, configured_weight, etc.) that
-    do NOT exist on this model — a known mismatch tracked in tests.
-    """
+    """Insert and return a SourceRegistryModel record."""
     source = SourceRegistryModel(
         id=source_id or f"src-{uuid.uuid4().hex[:8]}",
+        source_name=source_name,
+        domain_pattern=domain_pattern or domain,
         domain=domain,
+        category=category,
         source_tier=source_tier,
+        configured_weight=configured_weight,
+        effective_weight=effective_weight,
         base_weight=base_weight,
+        approved_count=approved_count,
+        corrected_count=corrected_count,
+        rejected_count=rejected_count,
+        total_reviews=total_reviews,
+        historical_accuracy=historical_accuracy,
         description=description,
         is_active=is_active,
     )
@@ -356,15 +373,13 @@ def make_resolved_value(
     chosen_value: str | None = "12",
     consensus_score: float = 0.92,
     resolution_method: str = "consensus",
-    conflict_detected: str = "false",
+    conflict_detected: bool = False,
+    review_status: str = "pending",
 ) -> ResolvedValueModel:
-    """
-    Insert and return a ResolvedValueModel record.
+    """Insert and return a ResolvedValueModel record."""
+    if not db.query(CrawlJobModel).filter(CrawlJobModel.id == job_id).first():
+        make_crawl_job(db, job_id=job_id, school_id=school_id)
 
-    Note: The ORM model has no ``review_status`` column.  The published.py
-    route filters on ``review_status == 'approved'`` which does not exist —
-    a known schema mismatch tracked in tests.
-    """
     rv = ResolvedValueModel(
         id=value_id or f"rv-{uuid.uuid4().hex[:8]}",
         job_id=job_id,
@@ -374,6 +389,7 @@ def make_resolved_value(
         consensus_score=consensus_score,
         resolution_method=resolution_method,
         conflict_detected=conflict_detected,
+        review_status=review_status,
         resolved_at=datetime.now(UTC),
     )
     db.add(rv)

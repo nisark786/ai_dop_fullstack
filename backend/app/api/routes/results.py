@@ -42,7 +42,7 @@ PRODUCT_SPECS = {
 
 def _format_timestamp(dt: datetime | None) -> str:
     if not dt:
-        return "Sep 17, 2026 09:12 CT"
+        return "Unrecorded"
     return dt.strftime("%b %d, %Y %H:%M CT")
 
 
@@ -69,15 +69,7 @@ def _resolve_values_for_product(
     elif isinstance(raw_grades, str) and raw_grades:
         grade_str = raw_grades
     else:
-        lower = school_name.lower()
-        if "high" in lower:
-            grade_str = "9–12"
-        elif "middle" in lower or "junior" in lower:
-            grade_str = "6–8"
-        elif "elementary" in lower:
-            grade_str = "K–5"
-        else:
-            grade_str = "PK–12"
+        grade_str = "Unspecified"
 
     phone_val = (
         extracted.get("phone")
@@ -91,7 +83,7 @@ def _resolve_values_for_product(
     elif isinstance(learning_model, str) and learning_model:
         model_val = learning_model.title()
     else:
-        model_val = "Traditional, STEM"
+        model_val = "Not listed"
 
     return grade_str, phone_val, model_val
 

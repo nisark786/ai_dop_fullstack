@@ -41,6 +41,21 @@ export const BatchListView: React.FC = () => {
     });
   }, [activeTab, searchQuery, fetchBatches]);
 
+  // Passive 6-second polling while any batch is in processing status
+  useEffect(() => {
+    const hasProcessing = batches.some((b) => b.status?.toLowerCase() === 'processing');
+    if (!hasProcessing) return;
+
+    const interval = setInterval(() => {
+      fetchBatches({
+        status: activeTab === 'All' ? undefined : activeTab.toLowerCase(),
+        search: searchQuery.trim() || undefined,
+      });
+    }, 6000);
+
+    return () => clearInterval(interval);
+  }, [batches, activeTab, searchQuery, fetchBatches]);
+
   const handleConfirmSoftDelete = async () => {
     if (!deletingBatch) return;
 

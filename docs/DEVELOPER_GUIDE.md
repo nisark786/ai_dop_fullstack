@@ -63,6 +63,9 @@ data_pipeline_fullstack/
 │   │   │   ├── source.py                    # Pydantic v2 schemas for source registry & weight updates
 │   │   │   ├── review.py                    # Pydantic v2 schemas for HITL ERCIE review queue
 │   │   │   └── job.py                       # Pydantic v2 schemas for crawler and extraction jobs
+│   │   ├── services/                        # Business logic & background workers
+│   │   │   ├── batches/                     # Batch intake, file parsers, and templates
+│   │   │   └── agents/                      # Background multi-threaded batch agent orchestrator
 │   │   ├── pipelines/audit_crawler/         # Autonomous 3-Agent DQA Crawler
 │   │   │   ├── planning_agent.py            # Aggregator detection & Tavily official site finder
 │   │   │   ├── extraction_agent.py          # Firecrawl scraper, markdown cleaner & LLM extractor (gpt-6-luna)
@@ -163,7 +166,6 @@ Make sure your development machine has:
 Create or verify `backend/.env` containing:
 ```env
 # Database Connection (Supabase PostgreSQL pooler or SQLite fallback)
-DATABASE_URL=postgresql://postgres.pxdthvfploylbpbrtobv:QRRbXWk5vjy7JCYy@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres
 DATABASE_URL=postgresql://postgres.[YOUR-PROJECT-REF]:[YOUR-PASSWORD]@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres
 
 # Target table for school records
@@ -377,24 +379,25 @@ Located in `backend/app/services/batches/` and `frontend/src/components/batches/
       - Retains soft-deleted batches and master schools for 30 days before permanent deletion.
       - Features live `days_remaining` retention countdown, one-click **Restore** button, and **Delete Forever** action for both entity types.
       - **Automated Background Worker**: Runs every 24 hours on the FastAPI lifespan handler to auto-purge batches and schools where `deleted_at > 30 days`. Also supports on-demand purge via `POST /api/batches/trash/purge-expired` and `POST /api/schools/trash/purge-expired`.
-    - `/batches/create`: Dedicated 3-step progressive intake flow (1. Batch Name, 2. Drop Zone + Template Download, 3. Live Validation Preview with status breakdown chips).
-    - `/batches/:id`: Streamlined Batch Detail view with interactive Batch Switcher Pills, visual stacked progress snapshot, "+ Add School" modal, and full school product matrix table with individual "Drop School" controls. (Agent dispatch triggers and audit drawers are separated into the dedicated AI Agents section).
+    - `/batches/create`: Dedicated 3-step progressive intake flow (1. Batch Name, 2. Drop Zone + Template Download + Invalid Rows CSV Export, 3. Live Validation Preview with status breakdown chips and Master Duplicate Resolution toggles). Routed via `useBatchStore.createBatch()`.
+    - `/batches/:id`: Streamlined Batch Detail view with interactive Batch Switcher Pills, visual stacked progress snapshot, "+ Add School" modal, client-side pagination (25/50/100 per page), multi-select school checkboxes with floating bulk action bar, and bulk school dropping.
   - **API Endpoints**:
     - `GET /api/batches`: Lists active batches (filters out soft-deleted items by default).
     - `GET /api/batches/trash`: Lists batches currently quarantined in the Trash Bucket with calculated `days_remaining`.
     - `POST /api/batches/trash/purge-expired`: Manually triggers purge of batches in trash older than retention threshold (default 30 days).
     - `PATCH /api/batches/{id}`: Updates batch name and description.
-    - `DELETE /api/batches/{id}`: Soft-deletes a batch by setting `deleted_at = UTC_TIMESTAMP` and `status = 'trashed'`.
+    - `DELETE /api/batches/{id}`: Soft-deletes a batch by setting `deleted_at = UTC_TIMESTAMP` and `status = 'trashed'`. Returns `HTTP 409 Conflict` if crawling or extraction jobs are actively running.
     - `POST /api/batches/{id}/restore`: Restores a trashed batch to active status (`deleted_at = None`, `status = 'ready'`).
-    - `DELETE /api/batches/{id}/permanent`: Irreversibly purges a batch and cascading relations.
+    - `DELETE /api/batches/{id}/permanent`: Irreversibly purges a batch and cascading relations. Returns `HTTP 409 Conflict` if jobs are actively running.
     - `POST /api/batches/{id}/schools`: Adds a school to the batch (links existing from library or creates new).
-    - `DELETE /api/batches/{id}/schools/{school_id}`: Drops a school from the batch without deleting the master school entity.
+    - `DELETE /api/batches/{id}/schools/{school_id}`: Drops a school from the batch without deleting master entity, soft-deleting staging records and cancelling pending review items (Orphan Guard).
+    - `POST /api/batches/{id}/schools/bulk-drop`: Drops multiple schools from a batch simultaneously, updating remaining counts and cancelling pending review outputs.
     - `GET /api/schools/trash`: Lists schools currently quarantined in the Trash Bucket with calculated `days_remaining`.
     - `POST /api/schools/{school_id}/restore`: Restores a trashed school back to active master catalog (`deleted_at = None`, `is_active = True`).
     - `DELETE /api/schools/{school_id}/permanent`: Irreversibly purges a school and its associated crawler data.
     - `POST /api/schools/trash/purge-expired`: Purges quarantined schools older than retention threshold.
   - **Active Navigation (Scope 1 Focus)**:
-    - Frontend sidebar navigation is focused strictly on **Dashboard** and **Batch Management** during Milestone 1.
+    - Frontend sidebar navigation is focused strictly on **Dashboard** and **Batch Management** during Milestone 1. Passive 6-second auto-polling updates batch status when agents are running.
 
 ---
 
@@ -429,13 +432,19 @@ Located across `backend/app/api/routes/agents.py`, `backend/app/schemas/agents.p
 - **Endpoints**:
   - `GET /api/agents/registry`: Returns full catalog of registered data products, models, versions, and readiness.
   - `POST /api/agents/run-for-batch`: Dispatches selected agents across schools in one or multiple target batches (`batch_ids`).
-  - `GET /api/agents/jobs`: Returns live execution progress and metrics across target batches with 3-second UI polling.
+  - `GET /api/agents/jobs`: Returns live execution progress, elapsed seconds, and metrics across target batches with 3-second UI polling.
+  - `POST /api/agents/jobs/{job_id}/pause`: Pauses in-flight job safely targeting only the specific batch linked to that job (`_resolve_batch_for_job`).
+  - `POST /api/agents/jobs/{job_id}/resume`: Resumes remaining unverified schools targeting the specific batch linked to that job.
+  - `POST /api/agents/jobs/{job_id}/cancel`: Cancels the job and resets crawling schools to pending, isolated strictly to the target batch.
+- **Background Worker & Lifecycle**:
+  - Automatically transitions `batch.status = "completed"` once all schools in a batch reach terminal verification.
+  - Filters out soft-deleted/dropped staging schools (`deleted_at.is_(None)`) in whole-batch agent triggers.
 - **Frontend Components**:
   - `AgentsOperateView.tsx`: Dual-panel operational control screen:
     - **Target Batches Panel**: Real-time batch name search, "Select All" / "Clear", checkboxes, school count badges, status tags, and fixed-height scrollable list (`max-h-[380px]`).
     - **AI Agents Panel**: Real-time agent/field keyword search, "Select Active" / "Clear", selection checkboxes (enabled for Metadata Agent, locked for Phase 2), version badges, and fixed-height scrollable list (`max-h-[380px]`).
-    - **Action Trigger Bar**: Summary of selected batches, total schools, and selected agents with single `[▶ Start Running]` action (priority and scope dropdowns removed for simplified, stream-lined execution).
-    - **Live Execution Monitor**: Multi-batch aggregate progress bar and per-batch live execution status cards with 3-second polling.
+    - **Action Trigger Bar**: Summary of selected batches, total schools, concurrency slider (1–5 workers with 6.0s spacing), cache bypass toggle, and single `[▶ Start Running]` action dispatched via `useAgentStore`.
+    - **Live Execution Monitor**: Multi-batch aggregate progress bar and per-batch live execution status cards with 3-second polling, live elapsed runtime display, stale run detection with force reset, and direct `[Review Outputs →]` shortcut to the Review Queue on completed jobs.
   - `Sidebar.tsx`: Includes dedicated **AI AGENTS** navigation group linking to `/agents`.
 
 ---
@@ -448,13 +457,17 @@ Located across `backend/app/cost_tracking/`, `backend/app/api/routes/costs.py`, 
   - **Database Persistence with Graceful JSONL Fallback (`recorder.py`)**: Stores usage in PostgreSQL table `openai_cost_logs` (managed via Alembic migration `f5b7218ac93d_add_openai_cost_logs.py`). If the primary database is unavailable, logs automatically append to `logs/openai_costs.jsonl`.
   - **Configurable Pricing**: Rates are configured dynamically via environment variables (`OPENAI_INPUT_COST_PER_M` and `OPENAI_OUTPUT_COST_PER_M`). Configured to official `gpt-6-luna` rates: **$0.10 / 1M input tokens** and **$0.50 / 1M output tokens**.
 - **API Endpoints**:
-  - `GET /api/costs/summary?days=7`: Returns total spend, invocation count, token metrics, and per-agent cost breakdown.
-  - `GET /api/costs/invocations?page=1&page_size=20&agent_name=&batch_id=`: Returns paginated invocation logs with latency and token breakdowns.
+  - `GET /api/costs/summary?days=7`: Returns total spend, invocation count, granular token metrics (`total_prompt_tokens`, `total_completion_tokens`), average duration/latency (`avg_duration_ms`), and per-agent cost and latency breakdown.
+  - `GET /api/costs/invocations?page=1&page_size=20&agent_name=&batch_id=`: Returns paginated invocation logs with resolved human-readable `batch_name` and `school_name`, with fuzzy search support by batch name or UUID.
+  - `GET /api/costs/export?days=&agent_name=&batch_id=`: Streams all matching cost log entries as a full downloadable CSV audit file (`text/csv` with `Content-Disposition: attachment`).
 - **Frontend Dashboard (`/costs`)**:
   - Accessible via **AI AGENTS $\rightarrow$ Cost & Token Monitor** in the navigation rail.
-  - 4 Key KPI Cards: Total Cost, API Invocations, Tokens Consumed, and Avg Cost / Call.
-  - Visual horizontal progress bars displaying per-agent spend and proportion.
-  - Real-time search by Agent Name and Batch ID with one-click **Export CSV** and automated 10-second polling.
+  - State managed via dedicated Zustand store `useCostStore.ts`, preserving filters, pagination, and data across route navigations.
+  - 4 Key KPI Cards: Total Spend (USD) with GPT-6 Luna tag, API Invocations, Tokens Consumed (with Prompt vs Completion % pill tags), and Avg Cost / Call with Latency metrics.
+  - Visual horizontal progress bars displaying per-agent spend, token split, and average duration.
+  - Invocations table with resolved Batch and School names and hoverable UUID tooltips.
+  - Full server-side **Export Audit CSV** streaming export.
+  - Execution-aware smart polling: 5-second rapid sync when agent crawling jobs are active, and 30-second passive sync when idle.
 
 ---
 
@@ -555,7 +568,7 @@ Located across `backend/app/api/routes/review.py`, `backend/app/schemas/review.p
   - **Batch & Product Partitioned School Review (`GET /api/review/schools`)**:
     - Query parameters: `batch_id`, `product` (e.g. `'info'`), `queue_type` (`'verification'` | `'approved'` | `'recrawl'`), and `search`.
     - Returns `list[VerificationSchoolItem]` complete with DQA score, average confidence %, extracted contact details, recommendations, evidence citations, `is_published` flag, and `production_school_id`.
-    - When `queue_type == 'approved'`, queries both `"approved"` and `"published"` records from `staging_schools`.
+    - When `queue_type == 'approved'`, queries strictly pending `"approved"` records from `staging_schools`, automatically excluding published records once they are promoted to the master `schools` catalog.
   - **Unified Multi-Scope Review Actions (`POST /api/review/bulk-action`)**:
     - Accepts `BulkReviewActionRequest` with `scope` (`'single'` | `'group'` | `'batch'`) and `action` (`'approve'` | `'reject'` | `'undo'` | `'publish'`).
     - **`approve`**: Marks school `verified`, applies recommended attributes, and routes to **Approved Schools** (`/approved`).
@@ -684,6 +697,46 @@ To maintain high operator confidence and prevent accidental triggers during data
   - **Cost Monitor (`/costs`)**: `[‹ Prev]`, `[Next ›]`.
 - **Persistent Visibility**: Avoid hiding button text behind responsive utility classes (such as `hidden sm:inline` or `hidden lg:inline`) on primary actions like `Edit`, `Delete`, and `Drop`.
 - **Accessible Dialog Headers**: Modal and drawer close buttons must carry `aria-label="Close"` and `title="Close"` attributes.
+
+---
+
+### 6.16. AWS RDS Sandbox Publishing Synchronization (`sdn_prod_sandbox`)
+
+To bridge verified data intake with downstream testing environments, SchoolPath features a fail-safe dual-database publishing workflow:
+1. **Primary Master Promotion**: When an operator publishes an approved school from `/approved` (`POST /api/review/bulk-action` with `action="publish"`), the staging record is promoted locally to the master Supabase database (`Schools` table).
+2. **AWS RDS Sandbox Synchronization (`sdn_prod_sandbox`)**: Simultaneously, if `SANDBOX_ENABLED=true` in `backend/.env`, the system extracts verified core attributes and synchronizes them directly into `public.schools` on AWS RDS PostgreSQL.
+
+#### A. Active vs. Ignored Column Boundaries
+To avoid overwriting specialized curriculum or enrollment rubrics, the Sandbox synchronization enforces strict column scoping:
+- **Active Core Columns (Updated/Inserted in Sandbox)**:
+  - `name`: Cleaned, non-empty school name.
+  - `website`: Canonical school website URL.
+  - `address`: Verified physical street address.
+  - `phone`: Cleaned phone number (trailing `.0` numeric artifacts automatically stripped).
+  - `email`: Contact / admissions email.
+  - `type`: JSONB array of school classifications (e.g. `["private"]`).
+  - `grades`: JSONB array of grade levels offered (e.g. `["K", "1", "2"]`).
+  - `description`: School mission statement or verified description.
+  - `is_active`: Set to `true` upon publication.
+  - `updated_at`: Set to current timestamp (`now()`).
+  - `id` / `created_at`: Native UUID / timestamp set on insert.
+- **Strictly Ignored Columns (Untouched in Sandbox)**:
+  - ❌ `learning_models`: Preserved as-is in Sandbox.
+  - ❌ `extracurricular_programs`: Preserved as-is in Sandbox.
+  - ❌ `open_enrollment`: Preserved as-is in Sandbox.
+  - ❌ `full_address`: Preserved as-is in Sandbox (only `address` is updated).
+
+#### B. Connection Management & Query Safety
+- **Pooled Singleton Engine**: Managed via `app/services/sandbox_sync/sandbox_client.py` using SQLAlchemy (`pool_size=5`, `max_overflow=5`, `pool_pre_ping=True`).
+- **Statement Timeout**: Automatically sets `-c statement_timeout=5000` (5 seconds) to prevent hung queries or database locks.
+- **Fail-Safe Isolation**: A network interruption to AWS RDS Sandbox will **never roll back** local Supabase promotion. If Sandbox is unreachable, Supabase commits safely, the failure is caught, and the error is persisted to `staging.metadata_json["sandbox_sync"] = {"status": "failed", "error": "..."}`.
+
+#### C. Manual Retry Endpoint & UI Controls
+- **Endpoint**: `POST /api/review/schools/{id}/retry-sandbox-sync` (returns `SandboxSyncStatusResponse`).
+- **UI Visibility**:
+  - **Approved Schools (`/approved`)**: Status column displays `● Sandbox Synced` or `● Sandbox Failed`.
+  - **Published Golden Datasets (`/published`)**: Dedicated **Sandbox Sync** column displaying green `Sandbox Synced` pill (hover reveals Sandbox UUID) or red `Sandbox Failed` pill alongside a 1-click **`[ ↺ Retry Sandbox Sync ]`** button.
+- **Zero Agent Mutations**: As an absolute safety guarantee, all writes to AWS RDS Sandbox are initiated strictly by human operators clicking "Publish" or "Retry Sandbox Sync" in the frontend.
 
 ---
 

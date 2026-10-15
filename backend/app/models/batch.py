@@ -4,12 +4,16 @@ Interoperable with SQLite (dev) and PostgreSQL (production).
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, Uuid
 from sqlalchemy.types import JSON
 
 from app.core.database import Base
+
+
+def _utc_now():
+    return datetime.now(UTC)
 
 
 class BatchModel(Base):
@@ -24,8 +28,8 @@ class BatchModel(Base):
     status = Column(String(50), nullable=False, default="ready", index=True)
     school_count = Column(Integer, nullable=False, default=0)
     created_by = Column(String(100), nullable=False, default="operator")
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
     deleted_at = Column(DateTime, nullable=True, index=True)
 
 
@@ -44,6 +48,6 @@ class BatchSchoolModel(Base):
     )
     status = Column(String(50), nullable=False, default="pending", index=True)
     metadata_json = Column(JSON, nullable=True)
-    added_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    added_at = Column(DateTime, nullable=False, default=_utc_now)
 
     __table_args__ = (Index("ix_batch_schools_batch_school", "batch_id", "school_id", unique=True),)

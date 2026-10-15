@@ -13,10 +13,14 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    Uuid,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.types import JSON
 
 from app.core.database import Base
+
+PG_JSON = JSONB().with_variant(JSON, "sqlite")
 
 
 class Schools(Base):
@@ -24,10 +28,10 @@ class Schools(Base):
 
     __tablename__ = "schools"
 
-    id = Column(UUID(as_uuid=True), primary_key=True)
+    id = Column(Uuid(as_uuid=True), primary_key=True)
     name = Column(Text, nullable=False)
-    type = Column(JSONB, nullable=False)
-    grades = Column(JSONB, nullable=False)
+    type = Column(PG_JSON, nullable=False)
+    grades = Column(PG_JSON, nullable=False)
     address = Column(Text, nullable=True)
     full_address = Column(Text, nullable=True)
     url = Column(Text, nullable=True)
@@ -35,7 +39,7 @@ class Schools(Base):
     phone = Column(Text, nullable=True)
     description = Column(Text, nullable=True)
     image_url = Column(Text, nullable=True)
-    learning_models = Column(JSONB, nullable=False)
+    learning_models = Column(PG_JSON, nullable=False)
     latitude = Column(Numeric, nullable=True)
     longitude = Column(Numeric, nullable=True)
     booth_location = Column(Text, nullable=True)
@@ -64,7 +68,7 @@ class Schools(Base):
     )
     diverse_community = Column(Boolean, nullable=True)
     college_prep = Column(Boolean, nullable=True)
-    priority_keywords = Column(JSONB, nullable=True)
+    priority_keywords = Column(PG_JSON, nullable=True)
     special_needs_support = Column(Text, nullable=True)
     religious_affiliation = Column(Text, nullable=True)
     school_size = Column(Text, nullable=True)
@@ -74,7 +78,7 @@ class Schools(Base):
     stem_program = Column(Boolean, nullable=False)
     teaching_style = Column(Text, nullable=True)
     teaching_style_secondary = Column(Text, nullable=True)
-    extracurricular_programs = Column(JSONB, nullable=True)
+    extracurricular_programs = Column(PG_JSON, nullable=True)
     private_rubric_parent_experience = Column(Numeric, nullable=True)
     private_rubric_notes = Column(Text, nullable=True)
     private_rubric_total = Column(Numeric, nullable=True)
@@ -85,9 +89,9 @@ class Schools(Base):
     private_rubric_accreditation = Column(Numeric, nullable=True)
     alternative_classification = Column(Text, nullable=True)
     open_enrollment = Column(Boolean, nullable=False)
-    special_ed_support_types = Column(JSONB, nullable=True)
-    special_ed_support_levels = Column(JSONB, nullable=True)
-    claimed_by_user_id = Column(UUID(as_uuid=True), nullable=True)
+    special_ed_support_types = Column(PG_JSON, nullable=True)
+    special_ed_support_levels = Column(PG_JSON, nullable=True)
+    claimed_by_user_id = Column(Uuid(as_uuid=True), nullable=True)
     claimed_at = Column(DateTime, nullable=True)
     recruitment_contact_name = Column(Text, nullable=True)
     recruitment_contact_email = Column(Text, nullable=True)
@@ -108,11 +112,11 @@ class Schools(Base):
     cal_refresh_token_enc = Column(Text, nullable=True)
     cal_token_expires_at = Column(DateTime(timezone=True), nullable=True)
     cal_timezone = Column(Text, nullable=True)
-    cal_tour_availability = Column(JSONB, nullable=True)
+    cal_tour_availability = Column(PG_JSON, nullable=True)
     description_es = Column(Text, nullable=True)
     packet_data_es = Column(Text, nullable=True)
     email = Column(Text, nullable=True)
-    recruitment_contacts = Column(JSONB, nullable=True)
+    recruitment_contacts = Column(PG_JSON, nullable=True)
     school_admin_package = Column(Text, nullable=True)
     city = Column(String, nullable=True)
     state = Column(String, nullable=True)
@@ -132,8 +136,8 @@ class Schools(Base):
     slug_updated_at = Column(DateTime(timezone=True), nullable=True)
     application_link = Column(Text, nullable=True)
     sped_data_availability = Column(Boolean, nullable=True)
-    sped_support_class = Column(JSONB, nullable=True)
-    school_tier_id = Column(UUID(as_uuid=True), nullable=True)
+    sped_support_class = Column(PG_JSON, nullable=True)
+    school_tier_id = Column(Uuid(as_uuid=True), nullable=True)
     profile_verification_status = Column(Text, nullable=True)
     profile_verified_at = Column(DateTime, nullable=True)
     full_day = Column(Boolean, nullable=True)

@@ -47,6 +47,27 @@ class ApplicationSettings(BaseSettings):
             url = url.replace("postgres://", "postgresql://", 1)
         return url
 
+    # AWS RDS Sandbox Target Database Configuration
+    sandbox_enabled: bool = False
+    sandbox_host: str | None = None
+    sandbox_port: int = 5432
+    sandbox_database: str | None = None
+    sandbox_user: str | None = None
+    sandbox_password: str | None = None
+    sandbox_schema: str = "public"
+    sandbox_table: str = "schools"
+
+    @property
+    def sandbox_database_url(self) -> str | None:
+        """Constructs the AWS RDS Sandbox connection URL if parameters are set."""
+        if not self.sandbox_host or not self.sandbox_database or not self.sandbox_user:
+            return None
+        pwd_part = f":{self.sandbox_password}" if self.sandbox_password else ""
+        return (
+            f"postgresql+psycopg2://{self.sandbox_user}{pwd_part}@"
+            f"{self.sandbox_host}:{self.sandbox_port}/{self.sandbox_database}?sslmode=require"
+        )
+
 
 # Global configuration instance
 settings = ApplicationSettings()

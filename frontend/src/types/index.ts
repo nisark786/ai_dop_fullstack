@@ -208,6 +208,7 @@ export interface PromptTemplate {
 export interface PublishedRecord {
   id: string;
   school_id: string;
+  staging_school_id?: string | null;
   school_name: string;
   district?: string;
   product: string;
@@ -220,6 +221,7 @@ export interface PublishedRecord {
   version?: string;
   published_at: string;
   published_by?: string;
+  sandbox_sync?: SandboxSyncInfo | null;
 }
 
 // --- BATCH INTAKE & MANAGEMENT (FR-3) ---
@@ -399,6 +401,13 @@ export interface BatchDetailResponse {
   product_matrix: ProductProgressItem[];
 }
 
+export interface BulkDropSchoolsResponse {
+  message: string;
+  batch_id: string;
+  dropped_count: number;
+  remaining_schools: number;
+}
+
 export interface AgentRegistryItem {
   product_key: string;
   product_name: string;
@@ -453,13 +462,19 @@ export interface AgentCostBreakdown {
   total_cost_usd: number;
   total_calls: number;
   total_tokens: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  avg_duration_ms?: number;
 }
 
 export interface CostSummary {
   total_cost_usd: number;
   total_calls: number;
   total_tokens: number;
+  total_prompt_tokens?: number;
+  total_completion_tokens?: number;
   avg_cost_per_call_usd: number;
+  avg_duration_ms?: number;
   agent_breakdown: AgentCostBreakdown[];
   period_label: string;
 }
@@ -469,6 +484,8 @@ export interface CostLogEntry {
   agent_name: string;
   school_id: string | null;
   batch_id: string | null;
+  batch_name?: string | null;
+  school_name?: string | null;
   task_name: string | null;
   model: string;
   prompt_tokens: number;
@@ -607,6 +624,14 @@ export interface ReviewEvidenceItem {
   extracted_at?: string | null;
 }
 
+export interface SandboxSyncInfo {
+  status: 'synced' | 'failed' | 'disabled';
+  sandbox_id?: string | null;
+  synced_at?: string | null;
+  message?: string | null;
+  error?: string | null;
+}
+
 export interface VerificationSchoolItem {
   id: string;
   batch_id: string;
@@ -636,6 +661,7 @@ export interface VerificationSchoolItem {
   is_published?: boolean;
   production_school_id?: string | null;
   updated_at?: string | null;
+  sandbox_sync?: SandboxSyncInfo | null;
 }
 
 export interface BulkReviewActionRequest {

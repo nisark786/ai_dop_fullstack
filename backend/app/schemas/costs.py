@@ -14,6 +14,8 @@ class CostLogEntry(BaseModel):
     school_id: Annotated[str | None, Field(default=None, max_length=100)] = None
     batch_id: Annotated[str | None, Field(default=None, max_length=100)] = None
     task_name: Annotated[str | None, Field(default=None, max_length=100)] = None
+    batch_name: Annotated[str | None, Field(default=None, max_length=255)] = None
+    school_name: Annotated[str | None, Field(default=None, max_length=255)] = None
     model: Annotated[str, Field(min_length=1, max_length=100)]
     prompt_tokens: Annotated[int, Field(ge=0)]
     completion_tokens: Annotated[int, Field(ge=0)]
@@ -32,6 +34,9 @@ class AgentCostBreakdown(BaseModel):
     total_cost_usd: Annotated[float, Field(ge=0.0)]
     total_calls: Annotated[int, Field(ge=0)]
     total_tokens: Annotated[int, Field(ge=0)]
+    prompt_tokens: Annotated[int, Field(default=0, ge=0)] = 0
+    completion_tokens: Annotated[int, Field(default=0, ge=0)] = 0
+    avg_duration_ms: Annotated[float, Field(default=0.0, ge=0.0)] = 0.0
 
 
 class CostSummaryResponse(BaseModel):
@@ -42,7 +47,10 @@ class CostSummaryResponse(BaseModel):
     total_cost_usd: Annotated[float, Field(ge=0.0)]
     total_calls: Annotated[int, Field(ge=0)]
     total_tokens: Annotated[int, Field(ge=0)]
+    total_prompt_tokens: Annotated[int, Field(default=0, ge=0)] = 0
+    total_completion_tokens: Annotated[int, Field(default=0, ge=0)] = 0
     avg_cost_per_call_usd: Annotated[float, Field(ge=0.0)]
+    avg_duration_ms: Annotated[float, Field(default=0.0, ge=0.0)] = 0.0
     agent_breakdown: list[AgentCostBreakdown]
     period_label: Annotated[str, Field(min_length=1, max_length=50)]
 

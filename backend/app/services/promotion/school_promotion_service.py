@@ -15,6 +15,7 @@ from app.models.metadata_output import MetadataAgentOutputModel
 from app.models.pipeline import EvidenceRecordModel
 from app.models.schools import Schools
 from app.models.staging_school import StagingSchoolModel
+from app.services.sandbox_sync.sync_service import SandboxSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -135,4 +136,48 @@ class SchoolPromotionService:
             staging.name,
             target_school.id,
         )
+
+        # Fail-safe RDS Sandbox Synchronization
+        # Syncs only active core fields; leaves specialized columns untouched in Sandbox.
+        try:
+            meta = dict(staging.metadata_json or {})
+            existing_sandbox_id = (meta.get("sandbox_sync") or {}).get("sandbox_id")
+
+            school_sync_data = {
+                "name": target_school.name,
+                "website": target_school.website or target_school.url,
+                "address": target_school.address,
+                "phone": target_school.phone,
+                "email": extracted.get("email") or staging.email,
+                "type": target_school.type,
+                "grades": target_school.grades,
+                "description": target_school.description,
+            }
+
+            sync_result = SandboxSyncService.sync_school(
+                school_data=school_sync_data,
+                match_name=target_school.name,
+                existing_sandbox_id=existing_sandbox_id,
+            )
+            meta["sandbox_sync"] = sync_result.to_dict()
+            staging.metadata_json = meta
+            db.commit()
+        except Exception as sync_err:
+            logger.error(
+                "Sandbox sync encountered unexpected error for '%s': %s",
+                target_school.name,
+                sync_err,
+            )
+            try:
+                meta = dict(staging.metadata_json or {})
+                meta["sandbox_sync"] = {
+                    "status": "failed",
+                    "error": str(sync_err),
+                    "synced_at": _utc_now().isoformat(),
+                }
+                staging.metadata_json = meta
+                db.commit()
+            except Exception:
+                pass
+
         return target_school

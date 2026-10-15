@@ -12,6 +12,11 @@ import {
   Clock,
   Pause,
   Play,
+  CheckSquare,
+  Square,
+  MinusSquare,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
@@ -45,10 +50,22 @@ export const BatchDetailView: React.FC = () => {
   const fetchBatches = useBatchStore((s) => s.fetchBatches);
   const addSchoolToBatch = useBatchStore((s) => s.addSchoolToBatch);
   const dropSchoolFromBatch = useBatchStore((s) => s.dropSchoolFromBatch);
+  const bulkDropSchoolsFromBatch = useBatchStore((s) => s.bulkDropSchoolsFromBatch);
 
   const showToast = useAppStore((s) => s.showToast);
 
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Selection & Pagination States
+  const [selectedSchoolIds, setSelectedSchoolIds] = useState<Set<string>>(new Set());
+  const [isBulkDropModalOpen, setIsBulkDropModalOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+
+  useEffect(() => {
+    setPage(1);
+    setSelectedSchoolIds(new Set());
+  }, [searchQuery]);
 
   // Add School Modal States
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -66,6 +83,47 @@ export const BatchDetailView: React.FC = () => {
 
   const showNotification = (message: string, type: 'success' | 'error' = 'success') => {
     showToast(message, type);
+  };
+
+  const toggleSelectSchool = (schoolId: string) => {
+    setSelectedSchoolIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(schoolId)) {
+        next.delete(schoolId);
+      } else {
+        next.add(schoolId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = (currentPageSchoolIds: string[]) => {
+    setSelectedSchoolIds((prev) => {
+      const allSelected = currentPageSchoolIds.every((sid) => prev.has(sid));
+      const next = new Set(prev);
+      if (allSelected) {
+        currentPageSchoolIds.forEach((sid) => next.delete(sid));
+      } else {
+        currentPageSchoolIds.forEach((sid) => next.add(sid));
+      }
+      return next;
+    });
+  };
+
+  const handleConfirmBulkDrop = async () => {
+    if (!id || selectedSchoolIds.size === 0) return;
+
+    setIsSubmitting(true);
+    const success = await bulkDropSchoolsFromBatch(id, Array.from(selectedSchoolIds));
+    setIsSubmitting(false);
+
+    if (success) {
+      showNotification(`Successfully dropped ${selectedSchoolIds.size} school(s) from batch.`);
+      setSelectedSchoolIds(new Set());
+      setIsBulkDropModalOpen(false);
+    } else {
+      showNotification(storeError || 'Failed to drop schools.', 'error');
+    }
   };
 
   const loadBatchDetail = async (batchId: string) => {
@@ -186,6 +244,14 @@ export const BatchDetailView: React.FC = () => {
       (s.state && s.state.toLowerCase().includes(q))
     );
   });
+
+  const totalPages = Math.max(1, Math.ceil(filteredSchools.length / pageSize));
+  const paginatedSchools = filteredSchools.slice((page - 1) * pageSize, page * pageSize);
+  const currentPageSchoolIds = paginatedSchools.map((s) => String(s.school_id));
+  const allCurrentPageSelected =
+    currentPageSchoolIds.length > 0 && currentPageSchoolIds.every((sid) => selectedSchoolIds.has(sid));
+  const someCurrentPageSelected =
+    currentPageSchoolIds.some((sid) => selectedSchoolIds.has(sid)) && !allCurrentPageSelected;
 
   const products = [
     { id: 'info', name: 'Profile & Metadata', isPrimary: true },
@@ -455,10 +521,53 @@ export const BatchDetailView: React.FC = () => {
           </div>
         </div>
 
+        {/* Bulk Actions Floating Bar */}
+        {selectedSchoolIds.size > 0 && (
+          <div className="mx-6 my-3 p-3 bg-blue-50 border border-blue-200 rounded-xl flex items-center justify-between text-xs text-blue-900 animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <CheckSquare className="w-4 h-4 text-blue-600" />
+              <span className="font-semibold">{selectedSchoolIds.size} school(s) selected</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setSelectedSchoolIds(new Set())}
+                className="px-2.5 py-1 text-slate-600 hover:text-slate-800 bg-white border border-slate-200 rounded-lg font-medium cursor-pointer"
+              >
+                Clear Selection
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsBulkDropModalOpen(true)}
+                className="px-3 py-1 text-rose-700 hover:text-rose-800 bg-rose-100 hover:bg-rose-200 border border-rose-300 rounded-lg font-semibold flex items-center gap-1.5 cursor-pointer shadow-2xs"
+              >
+                <UserMinus className="w-3.5 h-3.5" />
+                <span>Drop Selected ({selectedSchoolIds.size})</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="overflow-x-auto max-h-[680px]">
           <table className="w-full text-left text-sm whitespace-nowrap">
             <thead className="bg-[#F8FAFC] border-b border-[#EEF2F7] text-slate-500 uppercase text-[11px] font-semibold tracking-wider sticky top-0 z-10 shadow-xs">
               <tr>
+                <th className="px-4 py-3 w-10 text-center">
+                  <button
+                    type="button"
+                    onClick={() => toggleSelectAll(currentPageSchoolIds)}
+                    className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
+                    title={allCurrentPageSelected ? 'Deselect all on page' : 'Select all on page'}
+                  >
+                    {allCurrentPageSelected ? (
+                      <CheckSquare className="w-4 h-4 text-blue-600" />
+                    ) : someCurrentPageSelected ? (
+                      <MinusSquare className="w-4 h-4 text-blue-600" />
+                    ) : (
+                      <Square className="w-4 h-4" />
+                    )}
+                  </button>
+                </th>
                 <th className="px-5 py-3 min-w-[260px]">School</th>
                 {products.map((p) => (
                   <th
@@ -477,18 +586,31 @@ export const BatchDetailView: React.FC = () => {
               {filteredSchools.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={2 + products.length}
+                    colSpan={3 + products.length}
                     className="px-6 py-12 text-center text-slate-500 text-xs font-semibold"
                   >
                     No schools in this batch match the search criteria.
                   </td>
                 </tr>
               ) : (
-                filteredSchools.map((s) => (
+                paginatedSchools.map((s) => (
                   <tr
                     key={s.school_id}
                     className="hover:bg-slate-50/70 transition-colors"
                   >
+                    <td className="px-4 py-3.5 text-center">
+                      <button
+                        type="button"
+                        onClick={() => toggleSelectSchool(String(s.school_id))}
+                        className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
+                      >
+                        {selectedSchoolIds.has(String(s.school_id)) ? (
+                          <CheckSquare className="w-4 h-4 text-blue-600" />
+                        ) : (
+                          <Square className="w-4 h-4" />
+                        )}
+                      </button>
+                    </td>
                     <td className="px-5 py-3.5">
                       <div className="font-bold text-[#0A1F3C] text-sm">{s.name}</div>
                       <div className="text-xs text-slate-500 flex items-center gap-2 mt-0.5">
@@ -579,6 +701,61 @@ export const BatchDetailView: React.FC = () => {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination Footer */}
+        {filteredSchools.length > 0 && (
+          <div className="p-4 border-t border-[#EEF2F7] flex flex-col sm:flex-row items-center justify-between gap-3 bg-white">
+            <div className="text-xs text-slate-500">
+              Showing <span className="font-semibold text-slate-700">{(page - 1) * pageSize + 1}</span> to{' '}
+              <span className="font-semibold text-slate-700">
+                {Math.min(page * pageSize, filteredSchools.length)}
+              </span>{' '}
+              of <span className="font-semibold text-slate-700">{filteredSchools.length}</span> schools
+            </div>
+
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                <span>Rows:</span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setPage(1);
+                  }}
+                  className="text-xs border border-slate-200 rounded px-2 py-1 bg-slate-50 focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  disabled={page <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  className="px-2.5 py-1 text-xs font-medium border border-slate-200 rounded text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                  <span>Prev</span>
+                </button>
+                <span className="text-xs font-semibold px-2 text-slate-600">
+                  Page {page} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={page >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  className="px-2.5 py-1 text-xs font-medium border border-slate-200 rounded text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 cursor-pointer"
+                >
+                  <span>Next</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ADD SCHOOL MODAL */}
@@ -799,6 +976,46 @@ export const BatchDetailView: React.FC = () => {
                 className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg transition-all inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
               >
                 {isSubmitting ? 'Removing...' : 'Remove School'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Drop Confirmation Modal */}
+      {isBulkDropModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-2xs p-4">
+          <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150 p-6">
+            <div className="flex items-start gap-3.5">
+              <div className="w-10 h-10 rounded-full bg-rose-100 flex items-center justify-center shrink-0">
+                <UserMinus className="w-5 h-5 text-rose-600" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="font-bold text-slate-900 text-sm">
+                  Drop {selectedSchoolIds.size} School(s) from Batch?
+                </h3>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Are you sure you want to remove <span className="font-bold text-slate-800">{selectedSchoolIds.size}</span> selected schools from batch <span className="font-semibold text-slate-800">"{batch.name}"</span>? They will be moved to the Trash Bucket and their pending review items will be cancelled.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end items-center gap-2.5 mt-6">
+              <button
+                type="button"
+                onClick={() => setIsBulkDropModalOpen(false)}
+                disabled={isSubmitting}
+                className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmBulkDrop}
+                disabled={isSubmitting}
+                className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg transition-all inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                {isSubmitting ? 'Dropping...' : `Drop ${selectedSchoolIds.size} Schools`}
               </button>
             </div>
           </div>

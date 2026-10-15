@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_database_session
-from app.models.source import SourceRegistryModel
+from app.models.pipeline import SourceRegistryModel
 from app.schemas.source import (
     SourceResponse,
     SourceWeightUpdateRequest,
@@ -32,6 +32,9 @@ def list_sources(db: Session = Depends(get_database_session)) -> list[SourceResp
                 approved_count=s.approved_count,
                 corrected_count=s.corrected_count,
                 rejected_count=s.rejected_count,
+                approved_ct=s.approved_count,
+                corrected_ct=s.corrected_count,
+                rejected_ct=s.rejected_count,
                 total_reviews=s.total_reviews,
                 historical_accuracy=s.historical_accuracy,
                 is_active=s.is_active,

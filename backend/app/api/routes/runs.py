@@ -11,6 +11,7 @@ from app.core.database import get_database_session
 from app.models.batch import BatchModel
 from app.models.metadata_output import MetadataAgentOutputModel
 from app.models.schools import Schools
+from app.models.staging_school import StagingSchoolModel
 from app.schemas.runs import BatchRunDetailResponse, BatchRunSummary, SchoolRunOutputItem
 from app.services.reporting.html_report_service import HtmlReportService
 from app.services.reporting.spreadsheet_service import SpreadsheetReportService
@@ -69,7 +70,16 @@ def _build_run_data(job_id: str, db: Session):
 
     schools_list = []
     for o in outputs:
-        school = db.query(Schools).filter(Schools.id == o.school_id).first()
+        school = None
+        if o.school_id:
+            school = db.query(Schools).filter(Schools.id == o.school_id).first()
+        if not school and o.staging_school_id:
+            school = (
+                db.query(StagingSchoolModel)
+                .filter(StagingSchoolModel.id == o.staging_school_id)
+                .first()
+            )
+
         s_name = school.name if school else "Unknown School"
         s_website = school.website if school else (o.extracted_fields or {}).get("website")
         s_address = (

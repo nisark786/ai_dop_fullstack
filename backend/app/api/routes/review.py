@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.database import get_database_session
@@ -21,10 +22,13 @@ from app.schemas.review import (
     ReviewActionResponse,
     ReviewCorrectRequest,
     ReviewEvidenceItem,
+    SandboxSyncInfoSchema,
+    SandboxSyncStatusResponse,
     ValueGroupResponse,
     VerificationSchoolItem,
 )
 from app.services.promotion.school_promotion_service import SchoolPromotionService
+from app.services.sandbox_sync.sync_service import SandboxSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +79,73 @@ def get_review_queue(db: Session = Depends(get_database_session)) -> list[Resolv
     )
 
     results: list[ResolvedValueResponse] = []
+    if not outputs:
+        return results
+
+    # 1. Collect unique staging and production school IDs
+    staging_ids = [o.staging_school_id for o in outputs if o.staging_school_id]
+    prod_ids = [o.school_id for o in outputs if o.school_id]
+
+    # 2. Batch prefetch staging and production schools
+    staging_map = (
+        {
+            s.id: s
+            for s in db.query(StagingSchoolModel)
+            .filter(StagingSchoolModel.id.in_(staging_ids), StagingSchoolModel.deleted_at.is_(None))
+            .all()
+        }
+        if staging_ids
+        else {}
+    )
+
+    prod_map = (
+        {
+            s.id: s
+            for s in db.query(Schools)
+            .filter(Schools.id.in_(prod_ids), Schools.deleted_at.is_(None))
+            .all()
+        }
+        if prod_ids
+        else {}
+    )
+
+    # 3. Batch prefetch latest output per school to check for newer verified runs
+    school_filter_conditions = []
+    if staging_ids:
+        school_filter_conditions.append(MetadataAgentOutputModel.staging_school_id.in_(staging_ids))
+    if prod_ids:
+        school_filter_conditions.append(MetadataAgentOutputModel.school_id.in_(prod_ids))
+
+    latest_by_school: dict[str, MetadataAgentOutputModel] = {}
+    if school_filter_conditions:
+        candidate_outputs = (
+            db.query(MetadataAgentOutputModel)
+            .filter(or_(*school_filter_conditions))
+            .order_by(MetadataAgentOutputModel.created_at.desc())
+            .all()
+        )
+        for lo in candidate_outputs:
+            s_key = str(lo.staging_school_id or lo.school_id or "")
+            if s_key and s_key not in latest_by_school:
+                latest_by_school[s_key] = lo
+
+    # 4. Batch prefetch all evidence records for target schools
+    evidence_filter_conditions = []
+    if staging_ids:
+        evidence_filter_conditions.append(EvidenceRecordModel.staging_school_id.in_(staging_ids))
+    if prod_ids:
+        evidence_filter_conditions.append(EvidenceRecordModel.school_id.in_(prod_ids))
+
+    evidence_map: dict[tuple[str, str], list[EvidenceRecordModel]] = {}
+    if evidence_filter_conditions:
+        all_evidences = db.query(EvidenceRecordModel).filter(or_(*evidence_filter_conditions)).all()
+        for ev in all_evidences:
+            ev_target_key = str(ev.staging_school_id or ev.school_id or "")
+            key = (ev_target_key, ev.field_name)
+            if key not in evidence_map:
+                evidence_map[key] = []
+            evidence_map[key].append(ev)
+
     seen_schools: set[str] = set()
 
     for o in outputs:
@@ -83,17 +154,8 @@ def get_review_queue(db: Session = Depends(get_database_session)) -> list[Resolv
         if not target_school_key or target_school_key in seen_schools:
             continue
 
-        # Check the true latest output for this school
-        latest_output = (
-            db.query(MetadataAgentOutputModel)
-            .filter(
-                MetadataAgentOutputModel.staging_school_id == o.staging_school_id
-                if o.staging_school_id
-                else MetadataAgentOutputModel.school_id == o.school_id
-            )
-            .order_by(MetadataAgentOutputModel.created_at.desc())
-            .first()
-        )
+        # Check precomputed latest output for this school
+        latest_output = latest_by_school.get(target_school_key)
 
         # If a newer run exists, or if the latest run is already verified/applied, skip this record
         if latest_output and latest_output.id != o.id:
@@ -105,22 +167,7 @@ def get_review_queue(db: Session = Depends(get_database_session)) -> list[Resolv
 
         seen_schools.add(target_school_key)
 
-        staging_school: StagingSchoolModel | None = None
-        school: Schools | None = None
-
-        if o.staging_school_id:
-            staging_school = (
-                db.query(StagingSchoolModel)
-                .filter(
-                    StagingSchoolModel.id == o.staging_school_id,
-                    StagingSchoolModel.deleted_at.is_(None),
-                )
-                .first()
-            )
-        if not staging_school and o.school_id:
-            school = db.query(Schools).filter(Schools.id == o.school_id).first()
-
-        entity = staging_school or school
+        entity = staging_map.get(o.staging_school_id) or prod_map.get(o.school_id)
         if not entity:
             continue
 
@@ -150,19 +197,8 @@ def get_review_queue(db: Session = Depends(get_database_session)) -> list[Resolv
                 conf_val if conf_val <= 1.0 else conf_val / 100.0
             )
 
-            # Query matching evidence citations
-            ev_query = db.query(EvidenceRecordModel).filter(
-                EvidenceRecordModel.field_name == rec_field
-            )
-            if o.staging_school_id:
-                ev_query = ev_query.filter(
-                    EvidenceRecordModel.staging_school_id == o.staging_school_id
-                )
-            elif o.school_id:
-                ev_query = ev_query.filter(EvidenceRecordModel.school_id == o.school_id)
-            else:
-                ev_query = ev_query.filter(False)
-            evidences = ev_query.all()
+            # Retrieve pre-fetched matching evidence citations
+            evidences = evidence_map.get((target_school_key, rec_field), [])
 
             candidates: list[EvidenceCandidateResponse] = []
             for ev in evidences:
@@ -376,6 +412,11 @@ def approve_review_item(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Associated school entity not found"
         )
+    if staging_school and staging_school.deleted_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Cannot approve output for a school that has been dropped or trashed.",
+        )
 
     for rec in output.recommendations or []:
         if field_name is None or rec.get("field") == field_name:
@@ -478,6 +519,11 @@ def correct_review_item(
     if not entity:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Associated school entity not found"
+        )
+    if staging_school and staging_school.deleted_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Cannot modify an output for a school that has been dropped or trashed.",
         )
 
     # Apply manual correction
@@ -603,7 +649,7 @@ def get_review_schools(
 
     # Queue partitioning logic
     if queue_type == "approved":
-        query = query.filter(StagingSchoolModel.status.in_(["approved", "published"]))
+        query = query.filter(StagingSchoolModel.status == "approved")
     elif queue_type == "recrawl":
         query = query.filter(StagingSchoolModel.status.in_(["rejected", "needs_recrawl"]))
     else:  # 'verification'
@@ -694,6 +740,17 @@ def get_review_schools(
 
         updated_str = st.updated_at.strftime("%Y-%m-%d %H:%M") if st.updated_at else None
 
+        sync_meta = (st.metadata_json or {}).get("sandbox_sync")
+        sandbox_sync_obj = None
+        if isinstance(sync_meta, dict) and "status" in sync_meta:
+            sandbox_sync_obj = SandboxSyncInfoSchema(
+                status=sync_meta.get("status", "disabled"),
+                sandbox_id=sync_meta.get("sandbox_id"),
+                synced_at=sync_meta.get("synced_at"),
+                message=sync_meta.get("message"),
+                error=sync_meta.get("error"),
+            )
+
         results.append(
             VerificationSchoolItem(
                 id=str(st.id),
@@ -720,6 +777,7 @@ def get_review_schools(
                 if st.production_school_id
                 else None,
                 updated_at=updated_str,
+                sandbox_sync=sandbox_sync_obj,
             )
         )
 
@@ -759,9 +817,7 @@ def execute_bulk_review_action(
                 ~StagingSchoolModel.status.in_(["approved", "published"])
             )
         elif payload.action == "publish":
-            batch_schools = batch_schools.filter(
-                StagingSchoolModel.status.in_(["approved", "published"])
-            )
+            batch_schools = batch_schools.filter(StagingSchoolModel.status == "approved")
         elif payload.action == "reject":
             batch_schools = batch_schools.filter(
                 ~StagingSchoolModel.status.in_(["rejected", "needs_recrawl"])
@@ -788,6 +844,8 @@ def execute_bulk_review_action(
         )
 
     updated_ids: list[str] = []
+    sandbox_synced_count = 0
+    sandbox_failed_count = 0
     now = datetime.now(UTC)
 
     for s_uuid in target_uuids:
@@ -826,6 +884,16 @@ def execute_bulk_review_action(
         elif payload.action == "publish":
             try:
                 SchoolPromotionService.promote_staging_school(db, staging.id)
+                db.refresh(staging)
+                meta = dict(staging.metadata_json or {})
+                prods = dict(meta.get("products") or {})
+                prod_data = dict(prods.get(payload.product) or {})
+
+                sync_info = meta.get("sandbox_sync") or {}
+                if sync_info.get("status") == "synced":
+                    sandbox_synced_count += 1
+                elif sync_info.get("status") == "failed":
+                    sandbox_failed_count += 1
             except Exception as err:
                 logger.error("Failed to promote staging school %s: %s", staging.id, err)
                 continue
@@ -863,11 +931,127 @@ def execute_bulk_review_action(
         "undo": ("Restored", "returned to Verification Queue"),
     }
     verb, dest = action_verbs.get(payload.action, ("Updated", "updated"))
-    msg = f"{verb} {len(updated_ids)} school(s) and {dest}."
+    if payload.action == "publish":
+        sandbox_note = ""
+        if sandbox_synced_count > 0:
+            sandbox_note = f" (Sandbox: {sandbox_synced_count} synced"
+            if sandbox_failed_count > 0:
+                sandbox_note += f", {sandbox_failed_count} failed)"
+            else:
+                sandbox_note += ")"
+        elif sandbox_failed_count > 0:
+            sandbox_note = f" (Sandbox: {sandbox_failed_count} failed — check retry)"
+        msg = f"Published {len(updated_ids)} school(s) and {dest}{sandbox_note}."
+    else:
+        msg = f"{verb} {len(updated_ids)} school(s) and {dest}."
 
     return BulkReviewActionResponse(
         action=payload.action,
         affected_count=len(updated_ids),
         message=msg,
         updated_school_ids=updated_ids,
+    )
+
+
+@router.post(
+    "/schools/{id}/retry-sandbox-sync",
+    response_model=SandboxSyncStatusResponse,
+    summary="Retry synchronizing a verified/published school to AWS RDS Sandbox",
+)
+def retry_sandbox_sync(
+    id: str,
+    db: Session = Depends(get_database_session),
+) -> SandboxSyncStatusResponse:
+    """Manually retries pushing a school record to AWS RDS Sandbox.
+
+    Extracts active verified fields and executes parameterized upsert into Sandbox.
+    Completely ignores specialized curriculum and enrollment fields.
+    """
+    try:
+        s_uuid = UUID(id)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid school UUID format: {id}",
+        ) from exc
+
+    staging = (
+        db.query(StagingSchoolModel)
+        .filter(StagingSchoolModel.id == s_uuid, StagingSchoolModel.deleted_at.is_(None))
+        .first()
+    )
+    if not staging:
+        # Check if caller passed production_school_id
+        staging = (
+            db.query(StagingSchoolModel)
+            .filter(
+                StagingSchoolModel.production_school_id == s_uuid,
+                StagingSchoolModel.deleted_at.is_(None),
+            )
+            .first()
+        )
+
+    if not staging:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"School with ID {id} not found in review queue.",
+        )
+
+    prod_school = None
+    if staging.production_school_id:
+        prod_school = db.query(Schools).filter(Schools.id == staging.production_school_id).first()
+
+    output = (
+        db.query(MetadataAgentOutputModel)
+        .filter(MetadataAgentOutputModel.staging_school_id == staging.id)
+        .order_by(MetadataAgentOutputModel.created_at.desc())
+        .first()
+    )
+    extracted = output.extracted_fields if output and output.extracted_fields else {}
+
+    school_data = {
+        "name": (prod_school.name if prod_school else None)
+        or extracted.get("name")
+        or staging.name,
+        "website": (prod_school.website if prod_school else None)
+        or extracted.get("website")
+        or staging.website,
+        "address": (prod_school.address if prod_school else None)
+        or extracted.get("address")
+        or staging.address,
+        "phone": (prod_school.phone if prod_school else None)
+        or extracted.get("phone")
+        or staging.phone,
+        "email": extracted.get("email") or staging.email,
+        "type": (prod_school.type if prod_school else None)
+        or extracted.get("type")
+        or staging.type,
+        "grades": (prod_school.grades if prod_school else None)
+        or extracted.get("grades")
+        or staging.grades,
+        "description": (prod_school.description if prod_school else None)
+        or extracted.get("description"),
+    }
+
+    meta = dict(staging.metadata_json or {})
+    existing_sandbox_id = (meta.get("sandbox_sync") or {}).get("sandbox_id")
+
+    sync_result = SandboxSyncService.sync_school(
+        school_data=school_data,
+        match_name=school_data.get("name"),
+        existing_sandbox_id=existing_sandbox_id,
+    )
+
+    meta["sandbox_sync"] = sync_result.to_dict()
+    staging.metadata_json = meta
+    staging.updated_at = datetime.now(UTC)
+    db.commit()
+
+    return SandboxSyncStatusResponse(
+        school_id=str(staging.id),
+        status=sync_result.status,
+        sandbox_id=sync_result.sandbox_id,
+        synced_at=sync_result.synced_at,
+        message=sync_result.message,
+        error=sync_result.error,
     )

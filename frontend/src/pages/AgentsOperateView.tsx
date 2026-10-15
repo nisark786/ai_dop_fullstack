@@ -42,6 +42,7 @@ export const AgentsOperateView: React.FC = () => {
     forceRefresh,
     jobs,
     isLoadingRegistry,
+    isDispatching,
   } = useAgentStore(
     useShallow((s) => ({
       registry: s.registry,
@@ -50,6 +51,7 @@ export const AgentsOperateView: React.FC = () => {
       forceRefresh: s.forceRefresh,
       jobs: s.jobs,
       isLoadingRegistry: s.isLoadingRegistry,
+      isDispatching: s.isDispatching,
     }))
   );
 
@@ -60,9 +62,9 @@ export const AgentsOperateView: React.FC = () => {
   const setSelectedAgentKeys = useAgentStore((s) => s.setSelectedAgentKeys);
   const toggleAgentSelection = useAgentStore((s) => s.toggleAgentSelection);
   const setForceRefresh = useAgentStore((s) => s.setForceRefresh);
+  const runAgentsForBatch = useAgentStore((s) => s.runAgentsForBatch);
 
   // --- Local UI State ---
-  const [isDispatching, setIsDispatching] = useState<boolean>(false);
   const [workers, setWorkers] = useState<number>(2);
   const [actionLoadingJobId, setActionLoadingJobId] = useState<string | null>(null);
 
@@ -154,6 +156,22 @@ export const AgentsOperateView: React.FC = () => {
     setSelectedAgentKeys([]);
   };
 
+  // --- Helper to format elapsed duration ---
+  const formatElapsed = (seconds?: number | null, startedAt?: string | null) => {
+    if (typeof seconds === 'number' && seconds > 0) {
+      const m = Math.floor(seconds / 60);
+      const s = Math.floor(seconds % 60);
+      return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    }
+    if (startedAt) {
+      const diff = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
+      const m = Math.floor(diff / 60);
+      const s = diff % 60;
+      return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    }
+    return null;
+  };
+
   // --- Run Selected Batches and Agents ---
   const handleStartRunning = async () => {
     if (selectedBatchIds.length === 0) {
@@ -165,26 +183,23 @@ export const AgentsOperateView: React.FC = () => {
       return;
     }
 
-    setIsDispatching(true);
     setDispatchFeedback(null);
     try {
-      const res = await api.runAgentsForBatch({
-        batch_ids: selectedBatchIds,
-        agent_keys: selectedAgentKeys,
-        scope: 'batch',
-        force_refresh: forceRefresh,
-        workers: workers,
-      });
+      const res = await runAgentsForBatch(
+        selectedBatchIds,
+        selectedAgentKeys,
+        forceRefresh,
+        workers
+      );
 
-      setDispatchFeedback({
-        type: 'success',
-        message: res.message,
-      });
-      showToast(res.message || 'Agents dispatched successfully!', 'success');
-
-      // Immediately refresh jobs and batches
-      await fetchJobs(selectedBatchIds);
-      await fetchBatches();
+      if (res) {
+        setDispatchFeedback({
+          type: 'success',
+          message: res.message,
+        });
+        showToast(res.message || 'Agents dispatched successfully!', 'success');
+        await fetchBatches();
+      }
     } catch (err: any) {
       const msg = err.message || 'Failed to dispatch agents.';
       setDispatchFeedback({
@@ -192,16 +207,14 @@ export const AgentsOperateView: React.FC = () => {
         message: msg,
       });
       showToast(msg, 'error');
-    } finally {
-      setIsDispatching(false);
     }
   };
 
   // --- Job Control Handlers ---
-  const handlePauseJob = async (jobId: string) => {
+  const handlePauseJob = async (jobId: string, batchId?: string) => {
     setActionLoadingJobId(jobId);
     try {
-      const res = await api.pauseJob(jobId);
+      const res = await api.pauseJob(jobId, batchId);
       showToast(res.message || 'Job paused.', 'success');
       await fetchJobs(selectedBatchIds);
       await fetchBatches();
@@ -212,10 +225,10 @@ export const AgentsOperateView: React.FC = () => {
     }
   };
 
-  const handleResumeJob = async (jobId: string) => {
+  const handleResumeJob = async (jobId: string, batchId?: string) => {
     setActionLoadingJobId(jobId);
     try {
-      const res = await api.resumeJob(jobId, workers);
+      const res = await api.resumeJob(jobId, workers, batchId);
       showToast(res.message || 'Job resumed.', 'success');
       await fetchJobs(selectedBatchIds);
       await fetchBatches();
@@ -226,13 +239,13 @@ export const AgentsOperateView: React.FC = () => {
     }
   };
 
-  const handleCancelJob = async (jobId: string) => {
+  const handleCancelJob = async (jobId: string, batchId?: string) => {
     if (!window.confirm('Are you sure you want to cancel this job? Remaining unverified schools will be reset to pending.')) {
       return;
     }
     setActionLoadingJobId(jobId);
     try {
-      const res = await api.cancelJob(jobId);
+      const res = await api.cancelJob(jobId, batchId);
       showToast(res.message || 'Job cancelled.', 'success');
       await fetchJobs(selectedBatchIds);
       await fetchBatches();
@@ -698,148 +711,193 @@ export const AgentsOperateView: React.FC = () => {
               </div>
             ) : (
               <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden">
-                {jobs.map((job) => (
-                  <div key={job.job_id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white hover:bg-slate-50/60 transition-colors">
-                    <div className="flex items-start gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0 mt-0.5">
-                        <Bot className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-slate-900">{job.product_name}</span>
-                          <span className="text-[10px] text-slate-400 font-mono">[{job.job_id}]</span>
+                {jobs.map((job) => {
+                  const elapsedStr = formatElapsed(job.elapsed_seconds, job.started_at);
+                  const isStale =
+                    job.status === 'running' &&
+                    ((job.elapsed_seconds && job.elapsed_seconds > 900) ||
+                      (job.started_at && (Date.now() - new Date(job.started_at).getTime()) > 900000));
+
+                  return (
+                    <div key={job.job_id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white hover:bg-slate-50/60 transition-colors">
+                      <div className="flex items-start gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <Bot className="w-4 h-4" />
                         </div>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          Agent: <code className="font-mono text-slate-600">{job.agent_id}</code> • Processed {job.completed_count} of {job.target_count} schools
-                        </p>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-slate-900">{job.product_name}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">[{job.job_id}]</span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Agent: <code className="font-mono text-slate-600">{job.agent_id}</code> • Processed {job.completed_count} of {job.target_count} schools
+                          </p>
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="flex items-center gap-3 sm:self-center self-end flex-wrap justify-end">
-                      {/* Status Chip */}
-                      {job.status === 'running' && (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200 animate-pulse">
-                          <Loader2 className="w-3 h-3 animate-spin text-amber-600" />
-                          <span>Running...</span>
-                        </span>
-                      )}
-                      {job.status === 'paused' && (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-900 border border-amber-300">
-                          <Pause className="w-3 h-3 text-amber-700 fill-amber-700" />
-                          <span>Paused</span>
-                        </span>
-                      )}
-                      {job.status === 'cancelled' && (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-300">
-                          <X className="w-3 h-3 text-slate-500" />
-                          <span>Cancelled</span>
-                        </span>
-                      )}
-                      {job.status === 'pending' && (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
-                          <Clock className="w-3 h-3 text-slate-500" />
-                          <span>Queued</span>
-                        </span>
-                      )}
-                      {job.status === 'completed' && (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                          <span>Completed</span>
-                        </span>
-                      )}
-                      {job.status === 'failed' && (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200">
-                          <AlertTriangle className="w-3 h-3 text-rose-600" />
-                          <span>Failed</span>
-                        </span>
-                      )}
+                      <div className="flex items-center gap-2.5 sm:self-center self-end flex-wrap justify-end">
+                        {/* Elapsed Duration */}
+                        {elapsedStr && (
+                          <span className="text-[10px] font-mono text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200">
+                            {elapsedStr}
+                          </span>
+                        )}
 
-                      {/* Interactive Job Controls (Pause / Resume / Cancel) */}
-                      {job.status === 'running' && (
-                        <div className="flex items-center gap-1.5">
+                        {/* Status Chip */}
+                        {job.status === 'running' && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200 animate-pulse">
+                            <Loader2 className="w-3 h-3 animate-spin text-amber-600" />
+                            <span>Running...</span>
+                          </span>
+                        )}
+                        {job.status === 'paused' && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-900 border border-amber-300">
+                            <Pause className="w-3 h-3 text-amber-700 fill-amber-700" />
+                            <span>Paused</span>
+                          </span>
+                        )}
+                        {job.status === 'cancelled' && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-300">
+                            <X className="w-3 h-3 text-slate-500" />
+                            <span>Cancelled</span>
+                          </span>
+                        )}
+                        {job.status === 'pending' && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+                            <Clock className="w-3 h-3 text-slate-500" />
+                            <span>Queued</span>
+                          </span>
+                        )}
+                        {job.status === 'completed' && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                            <span>Completed</span>
+                          </span>
+                        )}
+                        {job.status === 'failed' && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+                            <AlertTriangle className="w-3 h-3 text-rose-600" />
+                            <span>Failed</span>
+                          </span>
+                        )}
+
+                        {/* Stale Warning & Recovery */}
+                        {isStale && (
+                          <div className="flex items-center gap-1.5">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-rose-100 text-rose-800 border border-rose-300">
+                              <AlertTriangle className="w-3 h-3 text-rose-600" />
+                              <span>Stale Run</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleCancelJob(job.job_id, job.batch_id)}
+                              disabled={actionLoadingJobId === job.job_id}
+                              title="Force reset stale job"
+                              className="text-[10px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded-md transition-colors cursor-pointer"
+                            >
+                              Force Reset
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Interactive Job Controls (Pause / Resume / Cancel) */}
+                        {job.status === 'running' && !isStale && (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handlePauseJob(job.job_id, job.batch_id)}
+                              disabled={actionLoadingJobId === job.job_id}
+                              title="Pause execution safely"
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              {actionLoadingJobId === job.job_id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Pause className="w-3 h-3 fill-amber-700" />
+                              )}
+                              <span>Pause</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleCancelJob(job.job_id, job.batch_id)}
+                              disabled={actionLoadingJobId === job.job_id}
+                              title="Cancel crawl job and reset pending schools"
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              <Square className="w-2.5 h-2.5 fill-rose-700" />
+                              <span>Cancel</span>
+                            </button>
+                          </div>
+                        )}
+
+                        {job.status === 'paused' && (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleResumeJob(job.job_id, job.batch_id)}
+                              disabled={actionLoadingJobId === job.job_id}
+                              title={`Resume crawling with ${workers} parallel workers`}
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              {actionLoadingJobId === job.job_id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Play className="w-3 h-3 fill-emerald-800" />
+                              )}
+                              <span>Resume ({workers}w)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleCancelJob(job.job_id, job.batch_id)}
+                              disabled={actionLoadingJobId === job.job_id}
+                              title="Cancel crawl job completely"
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              <Square className="w-2.5 h-2.5 fill-rose-700" />
+                              <span>Cancel</span>
+                            </button>
+                          </div>
+                        )}
+
+                        {(job.status === 'failed' || job.status === 'cancelled') && (
                           <button
                             type="button"
-                            onClick={() => handlePauseJob(job.job_id)}
+                            onClick={() => handleResumeJob(job.job_id, job.batch_id)}
                             disabled={actionLoadingJobId === job.job_id}
-                            title="Pause execution safely"
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                            title="Resume remaining unverified schools"
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
                           >
                             {actionLoadingJobId === job.job_id ? (
                               <Loader2 className="w-3 h-3 animate-spin" />
                             ) : (
-                              <Pause className="w-3 h-3 fill-amber-700" />
-                            )}
-                            <span>Pause</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleCancelJob(job.job_id)}
-                            disabled={actionLoadingJobId === job.job_id}
-                            title="Cancel crawl job and reset pending schools"
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                          >
-                            <Square className="w-2.5 h-2.5 fill-rose-700" />
-                            <span>Cancel</span>
-                          </button>
-                        </div>
-                      )}
-
-                      {job.status === 'paused' && (
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handleResumeJob(job.job_id)}
-                            disabled={actionLoadingJobId === job.job_id}
-                            title={`Resume crawling with ${workers} parallel workers`}
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                          >
-                            {actionLoadingJobId === job.job_id ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <Play className="w-3 h-3 fill-emerald-800" />
+                              <RotateCcw className="w-3 h-3" />
                             )}
                             <span>Resume ({workers}w)</span>
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => handleCancelJob(job.job_id)}
-                            disabled={actionLoadingJobId === job.job_id}
-                            title="Cancel crawl job completely"
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                        )}
+
+                        {/* Direct Jump to Review Queue on Completed Jobs */}
+                        {job.status === 'completed' && (
+                          <Link
+                            to={`/review?batch_id=${job.batch_id}`}
+                            className="text-xs font-semibold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
                           >
-                            <Square className="w-2.5 h-2.5 fill-rose-700" />
-                            <span>Cancel</span>
-                          </button>
-                        </div>
-                      )}
+                            <span>Review Outputs</span>
+                            <span className="text-[10px]">→</span>
+                          </Link>
+                        )}
 
-                      {(job.status === 'failed' || job.status === 'cancelled') && (
-                        <button
-                          type="button"
-                          onClick={() => handleResumeJob(job.job_id)}
-                          disabled={actionLoadingJobId === job.job_id}
-                          title="Resume remaining unverified schools"
-                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-2 py-0.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                        <Link
+                          to={`/results?batch_id=${job.batch_id}`}
+                          className="text-xs font-medium text-slate-600 hover:text-blue-600 underline flex items-center gap-1"
                         >
-                          {actionLoadingJobId === job.job_id ? (
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <RotateCcw className="w-3 h-3" />
-                          )}
-                          <span>Resume ({workers}w)</span>
-                        </button>
-                      )}
-
-                      <Link
-                        to={`/results?batch_id=${job.batch_id}`}
-                        className="text-xs font-medium text-slate-600 hover:text-blue-600 underline flex items-center gap-1"
-                      >
-                        <span>View</span>
-                        <ExternalLink className="w-3 h-3" />
-                      </Link>
+                          <span>View</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </Link>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

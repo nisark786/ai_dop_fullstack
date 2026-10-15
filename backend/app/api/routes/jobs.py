@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_database_session
-from app.models.job import CrawlJobModel
+from app.models.pipeline import CrawlJobModel
 from app.schemas.job import CrawlJobResponse, JobCreateRequest, JobStartResponse
 
 router = APIRouter(prefix="/jobs", tags=["Crawl Jobs"])

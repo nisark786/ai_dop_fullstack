@@ -11,6 +11,7 @@ Endpoints:
 """
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -182,6 +183,26 @@ class TestReviewApprove:
         response = client.post("/api/review/invalid-output-id/approve")
         assert response.status_code == 400
 
+    def test_approve_dropped_staging_school_fails_with_410(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """Approving output for a dropped (soft-deleted) staging school returns HTTP 410 Gone."""
+        batch = make_batch(db_session, name="Dropped Batch")
+        staging = make_staging_school(
+            db_session, batch_id=batch.id, name="Dropped School", deleted_at=datetime.now(UTC)
+        )
+        output = make_metadata_output(
+            db_session,
+            staging_school_id=staging.id,
+            batch_id=batch.id,
+            recommendations=[{"field": "name", "recommended": "Should Fail"}],
+        )
+        db_session.flush()
+
+        response = client.post(f"/api/review/{output.id}/approve")
+        assert response.status_code == 410
+        assert "dropped or trashed" in response.json()["detail"].lower()
+
 
 class TestReviewCorrect:
     """Tests for POST /api/review/{id}/correct."""
@@ -220,6 +241,27 @@ class TestReviewCorrect:
 
         response = client.post(f"/api/review/{output.id}:name/correct", json={})
         assert response.status_code == 422
+
+    def test_correct_dropped_staging_school_fails_with_410(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """Modifying output for a dropped (soft-deleted) staging school returns HTTP 410 Gone."""
+        batch = make_batch(db_session, name="Dropped Batch Correct")
+        staging = make_staging_school(
+            db_session, batch_id=batch.id, name="Dropped School", deleted_at=datetime.now(UTC)
+        )
+        output = make_metadata_output(
+            db_session,
+            staging_school_id=staging.id,
+            batch_id=batch.id,
+            recommendations=[{"field": "name", "recommended": "Should Fail"}],
+        )
+        db_session.flush()
+
+        payload = {"corrected_value": "New Correction"}
+        response = client.post(f"/api/review/{output.id}:name/correct", json=payload)
+        assert response.status_code == 410
+        assert "dropped or trashed" in response.json()["detail"].lower()
 
 
 class TestReviewReject:
@@ -411,10 +453,10 @@ class TestBulkReviewAction:
         assert s1.production_school_id is not None
         assert s2.production_school_id is not None
 
-    def test_get_review_schools_approved_includes_published(
+    def test_get_review_schools_approved_excludes_published(
         self, client: TestClient, db_session: Session
     ) -> None:
-        """GET /api/review/schools?queue_type=approved returns both approved and published schools."""
+        """GET /api/review/schools?queue_type=approved returns only pending approved schools, excluding published."""
         batch = make_batch(db_session, name="Approved & Published Batch")
         make_staging_school(
             db_session, batch_id=batch.id, name="Approved School", status="approved"
@@ -427,11 +469,54 @@ class TestBulkReviewAction:
         response = client.get(f"/api/review/schools?queue_type=approved&batch_id={batch.id}")
         assert response.status_code == 200
         items = response.json()
-        assert len(items) == 2
+        assert len(items) == 1
 
         names = {item["name"] for item in items}
         assert "Approved School" in names
-        assert "Published School" in names
+        assert "Published School" not in names
 
-        pub_item = next(item for item in items if item["name"] == "Published School")
-        assert pub_item["is_published"] is True
+    def test_retry_sandbox_sync_invalid_id(self, client: TestClient) -> None:
+        """POST /api/review/schools/{id}/retry-sandbox-sync returns 400 for invalid UUID."""
+        res = client.post("/api/review/schools/invalid-uuid/retry-sandbox-sync")
+        assert res.status_code == 400
+
+    def test_retry_sandbox_sync_not_found(self, client: TestClient) -> None:
+        """POST /api/review/schools/{id}/retry-sandbox-sync returns 404 for unknown school."""
+        import uuid
+
+        res = client.post(f"/api/review/schools/{uuid.uuid4()}/retry-sandbox-sync")
+        assert res.status_code == 404
+
+    def test_retry_sandbox_sync_success(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ) -> None:
+        """POST /api/review/schools/{id}/retry-sandbox-sync successfully triggers sync and updates metadata."""
+        from app.services.sandbox_sync.sync_service import SandboxSyncResult
+
+        batch = make_batch(db_session, name="Retry Sandbox Batch")
+        staging = make_staging_school(
+            db_session, batch_id=batch.id, name="Sandbox Test Academy", status="published"
+        )
+        db_session.flush()
+
+        monkeypatch.setattr(
+            "app.services.sandbox_sync.sync_service.SandboxSyncService.sync_school",
+            lambda **kwargs: SandboxSyncResult(
+                status="synced",
+                sandbox_id="sb-uuid-12345",
+                message="Synced successfully",
+                synced_at="2026-10-15T12:00:00Z",
+            ),
+        )
+
+        res = client.post(f"/api/review/schools/{staging.id}/retry-sandbox-sync")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "synced"
+        assert data["sandbox_id"] == "sb-uuid-12345"
+        assert data["school_id"] == str(staging.id)
+
+        db_session.refresh(staging)
+        assert staging.metadata_json is not None
+        assert staging.metadata_json["sandbox_sync"]["status"] == "synced"
+        assert staging.metadata_json["sandbox_sync"]["sandbox_id"] == "sb-uuid-12345"

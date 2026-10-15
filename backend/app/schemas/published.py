@@ -10,6 +10,7 @@ class PublishedRecordResponse(BaseModel):
 
     id: str
     school_id: str
+    staging_school_id: str | None = None
     school_name: str
     district: str | None = None
     product: str
@@ -17,3 +18,4 @@ class PublishedRecordResponse(BaseModel):
     verified_value: str
     confidence_score: float
     published_at: str
+    sandbox_sync: dict | None = None

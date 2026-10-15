@@ -394,3 +394,106 @@ class TestTrashAndPermanentDelete:
 
         # Recent school should still exist
         assert db_session.query(Schools).filter(Schools.id == recent.id).first() is not None
+
+
+class TestSchoolCreateAndUpdate:
+    """Tests for POST /api/schools and PATCH /api/schools/{id}."""
+
+    def test_create_school_success(self, client: TestClient, db_session: Session) -> None:
+        """POST /api/schools creates a new school in the master catalog."""
+        payload = {
+            "name": "Austin Montessori Academy",
+            "website": "https://austinmontessori.example.com",
+            "address": "400 W 15th St",
+            "city": "Austin",
+            "state": "TX",
+            "zip_code": "78701",
+            "phone": "512-555-4321",
+            "email": "info@austinmontessori.example.com",
+            "description": "Inspiring young learners",
+            "type": ["private"],
+            "grades": ["PK", "K", "1"],
+            "is_active": True,
+        }
+
+        response = client.post("/api/schools", json=payload)
+        assert response.status_code == 201
+        data = response.json()
+        assert data["name"] == "Austin Montessori Academy"
+        assert data["phone"] == "512-555-4321"
+        assert data["is_active"] is True
+        assert data["id"] is not None
+
+        # Verify in database
+        saved = (
+            db_session.query(Schools).filter(Schools.name == "Austin Montessori Academy").first()
+        )
+        assert saved is not None
+        assert saved.city == "Austin"
+
+    def test_create_school_validation_failure(self, client: TestClient) -> None:
+        """POST /api/schools fails with 422 if name is too short or missing."""
+        response = client.post("/api/schools", json={"name": ""})
+        assert response.status_code == 422
+
+    def test_patch_school_success(self, client: TestClient, db_session: Session) -> None:
+        """PATCH /api/schools/{id} updates fields and toggles active status."""
+        school = make_school(
+            db_session,
+            name="Original School Name",
+            phone="512-000-0000",
+            is_active=True,
+        )
+        db_session.flush()
+
+        payload = {
+            "name": "Updated School Name",
+            "phone": "512-999-8888",
+            "is_active": False,
+        }
+        response = client.patch(f"/api/schools/{school.id}", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "Updated School Name"
+        assert data["phone"] == "512-999-8888"
+        assert data["is_active"] is False
+
+        # Verify in DB
+        db_session.refresh(school)
+        assert school.name == "Updated School Name"
+        assert school.phone == "512-999-8888"
+        assert school.is_active is False
+
+    def test_patch_school_staging_fallback(self, client: TestClient, db_session: Session) -> None:
+        """PATCH /api/schools/{id} successfully updates staging school if UUID is staging."""
+        batch = make_batch(db_session, name="Staging Patch Batch")
+        staging = make_staging_school(
+            db_session,
+            batch_id=batch.id,
+            name="Staging School Name",
+            address="100 Initial St",
+        )
+        db_session.flush()
+
+        response = client.patch(
+            f"/api/schools/{staging.id}",
+            json={"name": "Updated Staging Name", "address": "200 Updated St"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "Updated Staging Name"
+        assert data["address"] == "200 Updated St"
+
+        db_session.refresh(staging)
+        assert staging.name == "Updated Staging Name"
+        assert staging.address == "200 Updated St"
+
+    def test_patch_school_invalid_uuid(self, client: TestClient) -> None:
+        """PATCH /api/schools/{id} returns 400 for malformed UUID."""
+        response = client.patch("/api/schools/not-a-valid-uuid", json={"name": "Test"})
+        assert response.status_code == 400
+
+    def test_patch_school_not_found(self, client: TestClient) -> None:
+        """PATCH /api/schools/{id} returns 404 for non-existent school."""
+        response = client.patch(f"/api/schools/{uuid.uuid4()}", json={"name": "Test"})
+        assert response.status_code == 404

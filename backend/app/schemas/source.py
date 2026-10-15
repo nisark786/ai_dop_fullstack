@@ -29,7 +29,7 @@ class SourceWeightUpdateResponse(BaseModel):
 class SourceResponse(BaseModel):
     """Schema for returning source registry entities."""
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, str_strip_whitespace=True)
 
     id: str
     source_name: str
@@ -43,3 +43,8 @@ class SourceResponse(BaseModel):
     total_reviews: int
     historical_accuracy: float
     is_active: bool
+
+    # Frontend compatibility aliases
+    approved_ct: int = 0
+    corrected_ct: int = 0
+    rejected_ct: int = 0

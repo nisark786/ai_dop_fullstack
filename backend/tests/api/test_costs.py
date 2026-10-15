@@ -162,3 +162,84 @@ class TestCostInvocations:
     def test_cost_invocations_invalid_page_bounds(self, client: TestClient) -> None:
         """page < 1 returns HTTP 422."""
         assert client.get("/api/costs/invocations?page=0").status_code == 422
+
+    def test_cost_invocations_resolves_batch_and_school_names(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """Cost invocations populate human-readable batch_name and school_name."""
+        from tests.factories import make_batch, make_staging_school
+
+        batch = make_batch(db_session, name="Illinois Pilot 2026")
+        staging = make_staging_school(db_session, batch_id=batch.id, name="Lincoln High School")
+        db_session.commit()
+
+        make_cost_log(
+            db_session,
+            batch_id=str(batch.id),
+            school_id=str(staging.id),
+            agent_name="ExtractionAgent",
+            task_name="extract_emails",
+        )
+        db_session.commit()
+
+        response = client.get(f"/api/costs/invocations?batch_id={batch.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["items"]) >= 1
+        item = data["items"][0]
+        assert item["batch_name"] == "Illinois Pilot 2026"
+        assert item["school_name"] == "Lincoln High School"
+
+    def test_cost_invocations_filter_by_batch_name(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """Filtering by partial batch name matches logs referencing that batch."""
+        from tests.factories import make_batch
+
+        unique_name = f"North Dakota Batch {uuid.uuid4().hex[:6]}"
+        batch = make_batch(db_session, name=unique_name)
+        db_session.commit()
+
+        make_cost_log(db_session, batch_id=str(batch.id), task_name="crawl_nd")
+        db_session.commit()
+
+        response = client.get(f"/api/costs/invocations?batch_id={unique_name[:12]}")
+        assert response.status_code == 200
+        data = response.json()
+        assert any(item["batch_id"] == str(batch.id) for item in data["items"])
+
+
+class TestCostExport:
+    """Tests for GET /api/costs/export."""
+
+    def test_export_cost_logs_csv_returns_streaming_csv(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """GET /api/costs/export streams CSV formatted content with header and data."""
+        marker = f"csv-agent-{uuid.uuid4().hex[:6]}"
+        make_cost_log(
+            db_session,
+            agent_name=marker,
+            prompt_tokens=150,
+            completion_tokens=50,
+            total_tokens=200,
+            cost_usd=0.00004,
+            duration_ms=450,
+        )
+        db_session.commit()
+
+        response = client.get(f"/api/costs/export?agent_name={marker}")
+        assert response.status_code == 200
+        assert "text/csv" in response.headers.get("content-type", "")
+        assert "Content-Disposition" in response.headers
+        assert "openai_cost_audit_" in response.headers["Content-Disposition"]
+
+        content = response.text
+        lines = content.strip().split("\r\n" if "\r\n" in content else "\n")
+        assert len(lines) >= 2  # Header + at least 1 record
+        header = lines[0]
+        assert "Logged At (UTC)" in header
+        assert "Prompt Tokens" in header
+        assert "Completion Tokens" in header
+        assert "Cost (USD)" in header
+        assert marker in content

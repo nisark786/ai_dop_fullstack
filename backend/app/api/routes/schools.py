@@ -1,8 +1,9 @@
 import math
+import uuid
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
@@ -13,9 +14,11 @@ from app.models.staging_school import StagingSchoolModel
 from app.schemas.school import (
     PaginatedSchoolsResponse,
     SchoolActionResponse,
+    SchoolCreateSchema,
     SchoolResponseSchema,
     SchoolStatsSchema,
     SchoolTrashItem,
+    SchoolUpdateSchema,
 )
 
 router = APIRouter(prefix="/schools", tags=["Schools"])
@@ -329,22 +332,7 @@ def purge_expired_trash_schools(
     }
 
 
-@router.get(
-    "/{school_id}", response_model=SchoolResponseSchema, summary="Get single school details"
-)
-def get_school_by_id(school_id: str, db: Session = Depends(get_database_session)):
-    """
-    Fetch full school record by UUID.
-    """
-    try:
-        uuid_obj = UUID(school_id)
-    except ValueError as err:
-        raise HTTPException(status_code=400, detail="Invalid UUID format for school ID.") from err
-
-    school = db.query(Schools).filter(Schools.id == uuid_obj).first()
-    if not school:
-        raise HTTPException(status_code=404, detail=f"School '{school_id}' not found.")
-
+def _build_school_response(school: Schools) -> SchoolResponseSchema:
     return SchoolResponseSchema(
         id=str(school.id),
         name=school.name,
@@ -366,6 +354,156 @@ def get_school_by_id(school_id: str, db: Session = Depends(get_database_session)
         places_id=school.places_id,
         created_at=school.created_at,
         updated_at=school.updated_at,
+    )
+
+
+@router.post(
+    "",
+    response_model=SchoolResponseSchema,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new school in the master catalog",
+)
+def create_school(
+    payload: SchoolCreateSchema,
+    db: Session = Depends(get_database_session),
+) -> SchoolResponseSchema:
+    """Create a new school record in the master schools directory."""
+    now = datetime.now(UTC)
+    new_school = Schools(
+        id=uuid.uuid4(),
+        name=payload.name,
+        website=payload.website,
+        url=payload.url or payload.website,
+        address=payload.address,
+        full_address=payload.address,
+        city=payload.city,
+        state=payload.state or "TX",
+        zip_code=payload.zip_code,
+        phone=payload.phone,
+        email=payload.email,
+        description=payload.description or "",
+        type=payload.type or [],
+        grades=payload.grades or [],
+        learning_models=[],
+        has_academic_rigor=False,
+        is_active=payload.is_active,
+        is_tefa_approved=False,
+        faith_and_values=False,
+        has_arts_program=False,
+        hands_on_and_technical=False,
+        has_sports_program=False,
+        small_and_personal=False,
+        learning_differences=False,
+        budget_friendly=False,
+        dual_language=False,
+        before_after_care=False,
+        transportation_provided=False,
+        stem_program=False,
+        open_enrollment=False,
+        packet_available=False,
+        profile_verification_status=payload.profile_verification_status or "pending",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(new_school)
+    db.commit()
+    db.refresh(new_school)
+    return _build_school_response(new_school)
+
+
+@router.get(
+    "/{school_id}", response_model=SchoolResponseSchema, summary="Get single school details"
+)
+def get_school_by_id(school_id: str, db: Session = Depends(get_database_session)):
+    """
+    Fetch full school record by UUID.
+    """
+    try:
+        uuid_obj = UUID(school_id)
+    except ValueError as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid UUID format for school ID.",
+        ) from err
+
+    school = db.query(Schools).filter(Schools.id == uuid_obj).first()
+    if not school:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"School '{school_id}' not found.",
+        )
+
+    return _build_school_response(school)
+
+
+@router.patch(
+    "/{school_id}",
+    response_model=SchoolResponseSchema,
+    summary="Update an existing school record or toggle active status",
+)
+def update_school(
+    school_id: str,
+    payload: SchoolUpdateSchema,
+    db: Session = Depends(get_database_session),
+) -> SchoolResponseSchema:
+    """Update fields on an existing school record in the master directory or staging."""
+    try:
+        uuid_obj = UUID(school_id)
+    except ValueError as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid UUID format for school ID.",
+        ) from err
+
+    school = db.query(Schools).filter(Schools.id == uuid_obj, Schools.deleted_at.is_(None)).first()
+
+    if school:
+        update_data = payload.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            if hasattr(school, field):
+                setattr(school, field, value)
+
+        if "address" in update_data and update_data["address"]:
+            school.full_address = update_data["address"]
+
+        school.updated_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(school)
+        return _build_school_response(school)
+
+    # Check staging schools in case caller provided a staging record UUID
+    staging = (
+        db.query(StagingSchoolModel)
+        .filter(StagingSchoolModel.id == uuid_obj, StagingSchoolModel.deleted_at.is_(None))
+        .first()
+    )
+    if staging:
+        update_data = payload.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            if hasattr(staging, field):
+                setattr(staging, field, value)
+
+        staging.updated_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(staging)
+
+        return SchoolResponseSchema(
+            id=str(staging.id),
+            name=staging.name,
+            website=staging.website,
+            address=staging.address,
+            phone=staging.phone,
+            email=staging.email,
+            type=staging.type if isinstance(staging.type, list) else [],
+            grades=staging.grades if isinstance(staging.grades, list) else [],
+            is_active=True,
+            created_at=staging.created_at,
+            updated_at=staging.updated_at,
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"School '{school_id}' not found.",
     )
 
 

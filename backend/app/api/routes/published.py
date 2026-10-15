@@ -7,8 +7,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_database_session
-from app.models.resolved_value import ResolvedValueModel
+from app.models.pipeline import ResolvedValueModel
 from app.models.schools import Schools
+from app.models.staging_school import StagingSchoolModel
 from app.schemas.published import PublishedRecordResponse
 
 router = APIRouter(prefix="/published", tags=["Published Data"])
@@ -38,11 +39,28 @@ def get_published_records(
     for r in records:
         school_name = "Unknown School"
         district_name = None
+        staging_id_str = None
+        sandbox_sync_data = None
         try:
-            school = db.query(Schools).filter(Schools.id == UUID(r.school_id)).first()
+            school_uuid = UUID(r.school_id)
+            school = db.query(Schools).filter(Schools.id == school_uuid).first()
             if school:
                 school_name = school.name
-                district_name = school.district_name
+                district_name = getattr(school, "district_name", None)
+
+            # Query staging record to obtain sandbox sync provenance
+            staging = (
+                db.query(StagingSchoolModel)
+                .filter(
+                    (StagingSchoolModel.production_school_id == school_uuid)
+                    | (StagingSchoolModel.id == school_uuid)
+                )
+                .first()
+            )
+            if staging:
+                staging_id_str = str(staging.id)
+                if staging.metadata_json and "sandbox_sync" in staging.metadata_json:
+                    sandbox_sync_data = staging.metadata_json["sandbox_sync"]
         except Exception:
             pass
 
@@ -50,6 +68,7 @@ def get_published_records(
             PublishedRecordResponse(
                 id=r.id,
                 school_id=r.school_id,
+                staging_school_id=staging_id_str,
                 school_name=school_name,
                 district=district_name,
                 product=r.field_name,
@@ -59,6 +78,7 @@ def get_published_records(
                 published_at=r.resolved_at.strftime("%Y-%m-%d %H:%M")
                 if isinstance(r.resolved_at, datetime)
                 else str(r.resolved_at or ""),
+                sandbox_sync=sandbox_sync_data,
             )
         )
     return results

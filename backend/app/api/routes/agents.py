@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_database_session
 from app.models.batch import BatchModel, BatchSchoolModel
+from app.models.metadata_output import MetadataAgentOutputModel
 from app.models.pipeline import CrawlJobModel
 from app.models.staging_school import StagingSchoolModel
 from app.schemas.agent_dispatch import AgentDispatchResponse
@@ -22,6 +23,7 @@ from app.schemas.agents import (
     RunAgentsForBatchRequest,
     RunAgentsForBatchResponse,
 )
+from app.services.agents.batch_agent_worker import run_batch_metadata_worker
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +83,6 @@ def run_agents_for_batch(
 
     Dispatches active agents (like Metadata Agent) and safely skips unimplemented agents.
     """
-    from app.api.routes.batches import _run_batch_metadata_worker
-
     dispatched: list[AgentDispatchResponse] = []
     skipped: list[str] = []
 
@@ -179,7 +179,7 @@ def run_agents_for_batch(
                             bs.metadata_json = meta
 
                 batch.status = "processing"
-                batch.updated_at = datetime.utcnow()
+                batch.updated_at = datetime.now(UTC)
 
                 # Create CrawlJobModel record using valid DB columns
                 new_job = CrawlJobModel(
@@ -197,7 +197,7 @@ def run_agents_for_batch(
 
                 # Dispatch background worker with configurable concurrency
                 background_tasks.add_task(
-                    _run_batch_metadata_worker,
+                    run_batch_metadata_worker,
                     batch_id_str,
                     target_ids,
                     job_id,
@@ -387,6 +387,77 @@ def get_agent_jobs(
     return summaries
 
 
+def _resolve_batch_for_job(
+    db: Session,
+    job_id: str,
+    batch_id: UUID | None = None,
+) -> BatchModel:
+    """Precisely resolves the single target batch belonging to a job_id without affecting other batches."""
+    if batch_id:
+        batch = db.query(BatchModel).filter(BatchModel.id == str(batch_id)).first()
+        if batch:
+            return batch
+
+    # Check MetadataAgentOutputModel for associated batch_id
+    output = (
+        db.query(MetadataAgentOutputModel)
+        .filter(
+            MetadataAgentOutputModel.job_id == job_id,
+            MetadataAgentOutputModel.batch_id.is_not(None),
+        )
+        .first()
+    )
+    if output and output.batch_id:
+        batch = db.query(BatchModel).filter(BatchModel.id == str(output.batch_id)).first()
+        if batch:
+            return batch
+
+    # Check StagingSchoolModel in active/paused batches
+    active_batches = (
+        db.query(BatchModel).filter(BatchModel.status.in_(["processing", "paused", "ready"])).all()
+    )
+    for b in active_batches:
+        stagings = (
+            db.query(StagingSchoolModel)
+            .filter(
+                StagingSchoolModel.batch_id == str(b.id),
+                StagingSchoolModel.deleted_at.is_(None),
+            )
+            .all()
+        )
+        for s in stagings:
+            meta = s.metadata_json or {}
+            products = meta.get("products") or {}
+            info_stat = products.get("info") or {}
+            if info_stat.get("job_id") == job_id:
+                return b
+
+    # Check legacy BatchSchoolModel
+    for b in active_batches:
+        bs_list = db.query(BatchSchoolModel).filter(BatchSchoolModel.batch_id == str(b.id)).all()
+        for bs in bs_list:
+            meta = bs.metadata_json or {}
+            products = meta.get("products") or {}
+            info_stat = products.get("info") or {}
+            if info_stat.get("job_id") == job_id:
+                return b
+
+    # Fallback to the latest processing/paused batch if any
+    fallback = (
+        db.query(BatchModel)
+        .filter(BatchModel.status.in_(["processing", "paused"]))
+        .order_by(BatchModel.updated_at.desc())
+        .first()
+    )
+    if fallback:
+        return fallback
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"Target batch for job '{job_id}' not found.",
+    )
+
+
 @router.post(
     "/jobs/{job_id}/pause",
     response_model=JobActionResponse,
@@ -394,31 +465,26 @@ def get_agent_jobs(
 )
 def pause_agent_job(
     job_id: str,
+    batch_id: UUID | None = Query(None, description="Optional target batch ID"),
     db: Session = Depends(get_database_session),
 ):
-    """Gracefully pauses an in-flight agent job.
-
-    In-flight schools will finish and the worker will halt.
-    """
+    """Gracefully pauses an in-flight agent job for its target batch."""
     job = db.query(CrawlJobModel).filter(CrawlJobModel.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
+    target_batch = _resolve_batch_for_job(db, job_id, batch_id)
+
     job.status = "Paused"
-
-    batch_id = None
-    active_batches = db.query(BatchModel).filter(BatchModel.status == "processing").all()
-    for b in active_batches:
-        b.status = "paused"
-        b.updated_at = datetime.utcnow()
-        batch_id = str(b.id)
-
+    target_batch.status = "paused"
+    target_batch.updated_at = datetime.now(UTC)
     db.commit()
+
     return JobActionResponse(
         job_id=job_id,
-        batch_id=batch_id,
+        batch_id=str(target_batch.id),
         status="paused",
-        message=f"Job {job_id} paused. In-flight operations will stop gracefully.",
+        message=f"Job {job_id} for batch '{target_batch.name}' paused. In-flight operations will stop gracefully.",
     )
 
 
@@ -430,25 +496,16 @@ def pause_agent_job(
 def resume_agent_job(
     job_id: str,
     background_tasks: BackgroundTasks,
+    batch_id: UUID | None = Query(None, description="Optional target batch ID"),
     workers: int = Query(2, ge=1, le=5, description="Worker threads (1-5)"),
     db: Session = Depends(get_database_session),
 ):
-    """Resumes execution for all unverified schools in the batch without re-crawling completed ones."""
-    from app.api.routes.batches import _run_batch_metadata_worker
-
+    """Resumes execution for unverified schools in the target batch without re-crawling completed ones."""
     job = db.query(CrawlJobModel).filter(CrawlJobModel.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
-    target_batch = (
-        db.query(BatchModel)
-        .filter(BatchModel.status.in_(["paused", "processing", "ready"]))
-        .order_by(BatchModel.updated_at.desc())
-        .first()
-    )
-    if not target_batch:
-        raise HTTPException(status_code=400, detail="No active or paused batch found to resume.")
-
+    target_batch = _resolve_batch_for_job(db, job_id, batch_id)
     batch_id_str = str(target_batch.id)
 
     stagings = (
@@ -468,7 +525,7 @@ def resume_agent_job(
                 s.status = "pending"
 
     if not remaining_ids:
-        target_batch.status = "ready"
+        target_batch.status = "completed"
         job.status = "Completed"
         db.commit()
         return JobActionResponse(
@@ -480,11 +537,11 @@ def resume_agent_job(
 
     job.status = "Running"
     target_batch.status = "processing"
-    target_batch.updated_at = datetime.utcnow()
+    target_batch.updated_at = datetime.now(UTC)
     db.commit()
 
     background_tasks.add_task(
-        _run_batch_metadata_worker,
+        run_batch_metadata_worker,
         batch_id_str,
         remaining_ids,
         job_id,
@@ -507,41 +564,40 @@ def resume_agent_job(
 )
 def cancel_agent_job(
     job_id: str,
+    batch_id: UUID | None = Query(None, description="Optional target batch ID"),
     db: Session = Depends(get_database_session),
 ):
-    """Cancels a job and resets uncompleted schools back to pending."""
+    """Cancels a job and resets uncompleted schools in the target batch back to pending."""
     job = db.query(CrawlJobModel).filter(CrawlJobModel.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
+    target_batch = _resolve_batch_for_job(db, job_id, batch_id)
+    batch_id_str = str(target_batch.id)
+
     job.status = "Cancelled"
+    target_batch.status = "ready"
+    target_batch.updated_at = datetime.now(UTC)
 
-    active_batches = (
-        db.query(BatchModel).filter(BatchModel.status.in_(["processing", "paused"])).all()
-    )
-    for b in active_batches:
-        b.status = "ready"
-        b.updated_at = datetime.utcnow()
-
-        crawling_schools = (
-            db.query(StagingSchoolModel)
-            .filter(
-                StagingSchoolModel.batch_id == str(b.id),
-                StagingSchoolModel.status == "crawling",
-            )
-            .all()
+    crawling_schools = (
+        db.query(StagingSchoolModel)
+        .filter(
+            StagingSchoolModel.batch_id == batch_id_str,
+            StagingSchoolModel.status == "crawling",
         )
-        for s in crawling_schools:
-            s.status = "pending"
-            meta = dict(s.metadata_json or {})
-            if "products" in meta and "info" in meta["products"]:
-                meta["products"]["info"]["status"] = "queued"
-            s.metadata_json = meta
+        .all()
+    )
+    for s in crawling_schools:
+        s.status = "pending"
+        meta = dict(s.metadata_json or {})
+        if "products" in meta and "info" in meta["products"]:
+            meta["products"]["info"]["status"] = "queued"
+        s.metadata_json = meta
 
     db.commit()
     return JobActionResponse(
         job_id=job_id,
-        batch_id=str(active_batches[0].id) if active_batches else None,
+        batch_id=batch_id_str,
         status="cancelled",
-        message=f"Job {job_id} cancelled. Unfinished schools reset to pending.",
+        message=f"Job {job_id} for batch '{target_batch.name}' cancelled. Unfinished schools reset to pending.",
     )

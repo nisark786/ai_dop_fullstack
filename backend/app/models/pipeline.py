@@ -5,7 +5,18 @@ SQLAlchemy models for internal data pipeline execution, jobs, evidence, and audi
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Column, DateTime, Float, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    Uuid,
+)
 
 from app.core.database import Base
 
@@ -103,7 +114,8 @@ class ResolvedValueModel(Base):
     chosen_value = Column(Text, nullable=True)
     consensus_score = Column(Float, nullable=False)
     resolution_method = Column(String(50), default="consensus")
-    conflict_detected = Column(String(10), default="false")
+    conflict_detected = Column(Boolean, nullable=False, default=False)
+    review_status = Column(String(50), nullable=False, default="pending", index=True)
     evidence_ids = Column(JSON, nullable=True)
     resolved_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
@@ -117,8 +129,18 @@ class SourceRegistryModel(Base):
     __tablename__ = "source_registries"
 
     id = Column(String(50), primary_key=True, index=True)
-    domain = Column(String(255), unique=True, nullable=False, index=True)
-    source_tier = Column(String(50), nullable=False)
-    base_weight = Column(Float, nullable=False, default=0.5)
+    source_name = Column(String(100), nullable=False, default="Official Portal")
+    domain_pattern = Column(String(255), unique=True, nullable=False, index=True)
+    domain = Column(String(255), nullable=True, index=True)
+    category = Column(String(50), nullable=False, default="Category 1 — Official School")
+    source_tier = Column(String(50), nullable=True, default="Tier 1 - Official School Website")
+    configured_weight = Column(Float, nullable=False, default=100.0)
+    effective_weight = Column(Float, nullable=False, default=100.0)
+    base_weight = Column(Float, nullable=False, default=1.0)
+    approved_count = Column(Integer, nullable=False, default=0)
+    corrected_count = Column(Integer, nullable=False, default=0)
+    rejected_count = Column(Integer, nullable=False, default=0)
+    total_reviews = Column(Integer, nullable=False, default=0)
+    historical_accuracy = Column(Float, nullable=False, default=100.0)
     description = Column(String(255), nullable=True)
-    is_active = Column(String(10), default="true")
+    is_active = Column(Boolean, nullable=False, default=True)

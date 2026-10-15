@@ -21,9 +21,7 @@ Strategy
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import JSON, Uuid, create_engine, event
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy import Uuid, create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 # Force all models to register their metadata with Base (side-effect import)
@@ -38,33 +36,10 @@ from app.main import app
 SQLITE_TEST_URL = "sqlite:///file::memory:?cache=shared&uri=true"
 
 
-def _patch_pg_types_for_sqlite() -> None:
-    """
-    Walk every table in Base.metadata and replace PostgreSQL-specific column
-    types with SQLite-compatible equivalents.
-
-    The ``Schools`` model uses raw ``postgresql.JSONB`` and ``postgresql.UUID``
-    (not the cross-dialect variants that other models use).  This one-time
-    patch is safe for testing: we only read back Python values, never rely on
-    DB-level JSON indexing or UUID constraints.
-
-    Must be called before ``Base.metadata.create_all(engine)``.
-    """
-    for table in Base.metadata.tables.values():
-        for column in table.columns:
-            col_type = column.type
-            if isinstance(col_type, JSONB):
-                column.type = JSON()
-            elif isinstance(col_type, PG_UUID):
-                column.type = Uuid(as_uuid=True)
-
-
 def _patch_uuid_bind_processor() -> None:
-    """
-    Patch SQLAlchemy's Uuid.bind_processor so that when running on SQLite,
+    """Patch SQLAlchemy's Uuid.bind_processor so that when running on SQLite,
     string-formatted UUID parameters (e.g. from FastAPI path/query params)
     are automatically converted to uuid.UUID objects before SQLite binding.
-    Without this, SQLAlchemy raises AttributeError: 'str' object has no attribute 'hex'.
     """
     import contextlib
     import uuid as _uuid_mod
@@ -85,31 +60,6 @@ def _patch_uuid_bind_processor() -> None:
         return proc
 
     Uuid.bind_processor = safe_bind_processor
-
-
-def _deduplicate_indexes() -> None:
-    """
-    Remove duplicate SQLAlchemy Index objects (by name) from every table in
-    Base.metadata.
-
-    Some models (e.g. StagingSchoolModel) declare the same index twice:
-    once via ``Column(..., index=True)`` and again via an explicit
-    ``Index("ix_staging_schools_status", "status")`` in ``__table_args__``.
-    PostgreSQL silently handles this; SQLite raises
-    ``OperationalError: index already exists``.
-
-    We deduplicate by keeping only the first occurrence of each index name.
-    """
-    for table in Base.metadata.tables.values():
-        seen_names: set[str] = set()
-        to_remove = []
-        for index in list(table.indexes):
-            if index.name in seen_names:
-                to_remove.append(index)
-            else:
-                seen_names.add(index.name)
-        for index in to_remove:
-            table.indexes.discard(index)
 
 
 def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
@@ -136,13 +86,8 @@ def engine():
 
 @pytest.fixture(scope="session")
 def tables(engine):
-    """
-    Create all tables once per test session; drop them when done.
-    Patches PostgreSQL-specific types and deduplicates indexes first.
-    """
-    _patch_pg_types_for_sqlite()
+    """Create all tables once per test session; drop them when done."""
     _patch_uuid_bind_processor()
-    _deduplicate_indexes()
     Base.metadata.create_all(engine)
     yield
     Base.metadata.drop_all(engine)

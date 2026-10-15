@@ -22,13 +22,12 @@ The tests below:
 
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.api.routes.published import get_published_records
-from app.models.resolved_value import ResolvedValueModel
 from app.models.schools import Schools
 from tests.factories import make_school
 
@@ -36,16 +35,49 @@ from tests.factories import make_school
 class TestPublishedEndpoint:
     """Tests for GET /api/published."""
 
-    def test_get_published_returns_500_due_to_model_mismatch(self, client: TestClient) -> None:
-        """
-        GET /api/published currently returns HTTP 500 because `review_status`
-        does not exist on `ResolvedValueModel`.
-
-        This test documents the known model–route mismatch. When the migration/model
-        adds `review_status`, this test should be updated to expect HTTP 200.
-        """
+    def test_get_published_empty_returns_200(self, client: TestClient) -> None:
+        """GET /api/published returns HTTP 200 and empty list when no approved records exist."""
         response = client.get("/api/published")
-        assert response.status_code == 500
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_get_published_with_approved_records_returns_200(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """GET /api/published filters for review_status == 'approved' and resolves school details."""
+        from tests.factories import make_resolved_value
+
+        school = make_school(db_session, name="Harmony Science Academy", city="Dallas")
+        school.district_name = "Harmony ISD"
+        db_session.flush()
+
+        # Record 1: Approved (should be returned)
+        make_resolved_value(
+            db_session,
+            school_id=str(school.id),
+            field_name="teaching_style",
+            chosen_value="STEM Focused",
+            consensus_score=0.95,
+            review_status="approved",
+        )
+        # Record 2: Pending (should NOT be returned)
+        make_resolved_value(
+            db_session,
+            school_id=str(school.id),
+            field_name="grades",
+            chosen_value="K-12",
+            review_status="pending",
+        )
+
+        response = client.get("/api/published")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        item = data[0]
+        assert item["school_name"] == "Harmony Science Academy"
+        assert item["district"] == "Harmony ISD"
+        assert item["verified_value"] == "STEM Focused"
+        assert item["confidence_score"] == 0.95
 
     def test_published_route_is_registered(self, client: TestClient) -> None:
         """Verify GET /api/published exists in the OpenAPI route specification."""
@@ -91,8 +123,7 @@ class TestPublishedMappingLogic:
 
         mock_db.query.side_effect = side_effect_query
 
-        with patch.object(ResolvedValueModel, "review_status", create=True, new=MagicMock()):
-            results = get_published_records(db=mock_db)
+        results = get_published_records(db=mock_db)
 
         assert len(results) == 1
         item = results[0]
@@ -124,8 +155,7 @@ class TestPublishedMappingLogic:
         mock_query.limit.return_value.all.return_value = [mock_record]
         mock_query.first.return_value = None  # School not found
 
-        with patch.object(ResolvedValueModel, "review_status", create=True, new=MagicMock()):
-            results = get_published_records(db=mock_db)
+        results = get_published_records(db=mock_db)
 
         assert len(results) == 1
         item = results[0]

@@ -12,7 +12,7 @@ import uuid
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.models.job import CrawlJobModel
+from app.models.pipeline import CrawlJobModel
 from tests.factories import make_crawl_job
 
 

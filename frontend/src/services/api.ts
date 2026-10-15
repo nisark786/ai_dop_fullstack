@@ -19,6 +19,7 @@ import type {
   BatchSummaryItem,
   BatchDetailResponse,
   BatchConfirmCreateRequest,
+  BulkDropSchoolsResponse,
   BatchUpdateRequest,
   AddBatchSchoolRequest,
   RunMetadataAgentRequest,
@@ -37,6 +38,7 @@ import type {
   VerificationSchoolItem,
   BulkReviewActionRequest,
   BulkReviewActionResponse,
+  SandboxSyncInfo,
 } from '../types';
 
 export { API_BASE_URL };
@@ -219,6 +221,13 @@ export const api = {
     return res.data;
   },
 
+  async retrySandboxSync(schoolId: string): Promise<SandboxSyncInfo> {
+    const res = await apiClient.post<SandboxSyncInfo>(
+      `/review/schools/${encodeURIComponent(schoolId)}/retry-sandbox-sync`
+    );
+    return res.data;
+  },
+
   // --- Sources & Ranking ---
   async getSources(): Promise<SourceRegistryItem[]> {
     const res = await apiClient.get<SourceRegistryItem[]>('/sources');
@@ -338,6 +347,14 @@ export const api = {
     return res.data;
   },
 
+  async bulkDropSchoolsFromBatch(batchId: string, schoolIds: string[]): Promise<BulkDropSchoolsResponse> {
+    const res = await apiClient.post<BulkDropSchoolsResponse>(
+      `/batches/${encodeURIComponent(batchId)}/schools/bulk-drop`,
+      { school_ids: schoolIds }
+    );
+    return res.data;
+  },
+
   async purgeExpiredTrash(retentionDays: number = 30) {
     const res = await apiClient.post('/batches/trash/purge-expired', null, {
       params: { retention_days: retentionDays },
@@ -376,20 +393,33 @@ export const api = {
     return res.data;
   },
 
-  async pauseJob(jobId: string): Promise<JobActionResponse> {
-    const res = await apiClient.post<JobActionResponse>(`/agents/jobs/${encodeURIComponent(jobId)}/pause`);
+  async pauseJob(jobId: string, batchId?: string): Promise<JobActionResponse> {
+    const res = await apiClient.post<JobActionResponse>(
+      `/agents/jobs/${encodeURIComponent(jobId)}/pause`,
+      null,
+      { params: batchId ? { batch_id: batchId } : undefined }
+    );
     return res.data;
   },
 
-  async resumeJob(jobId: string, workers?: number): Promise<JobActionResponse> {
-    const res = await apiClient.post<JobActionResponse>(`/agents/jobs/${encodeURIComponent(jobId)}/resume`, null, {
-      params: workers ? { workers } : undefined,
-    });
+  async resumeJob(jobId: string, workers?: number, batchId?: string): Promise<JobActionResponse> {
+    const params: Record<string, any> = {};
+    if (workers) params.workers = workers;
+    if (batchId) params.batch_id = batchId;
+    const res = await apiClient.post<JobActionResponse>(
+      `/agents/jobs/${encodeURIComponent(jobId)}/resume`,
+      null,
+      { params: Object.keys(params).length > 0 ? params : undefined }
+    );
     return res.data;
   },
 
-  async cancelJob(jobId: string): Promise<JobActionResponse> {
-    const res = await apiClient.post<JobActionResponse>(`/agents/jobs/${encodeURIComponent(jobId)}/cancel`);
+  async cancelJob(jobId: string, batchId?: string): Promise<JobActionResponse> {
+    const res = await apiClient.post<JobActionResponse>(
+      `/agents/jobs/${encodeURIComponent(jobId)}/cancel`,
+      null,
+      { params: batchId ? { batch_id: batchId } : undefined }
+    );
     return res.data;
   },
 
@@ -419,6 +449,26 @@ export const api = {
 
     const res = await apiClient.get<CostInvocationsResponse>('/costs/invocations', { params: queryParams });
     return res.data;
+  },
+
+  async downloadCostLogsCsv(
+    params?: {
+      days?: number;
+      agent_name?: string;
+      batch_id?: string;
+    },
+    filename: string = `openai_cost_audit_${new Date().toISOString().slice(0, 10)}.csv`
+  ): Promise<void> {
+    const queryParams: Record<string, string | number> = {};
+    if (params?.days) queryParams.days = params.days;
+    if (params?.agent_name) queryParams.agent_name = params.agent_name;
+    if (params?.batch_id) queryParams.batch_id = params.batch_id;
+
+    const res = await apiClient.get('/costs/export', {
+      params: queryParams,
+      responseType: 'blob',
+    });
+    saveBlobAsFile(new Blob([res.data], { type: 'text/csv' }), filename);
   },
 
   // --- Pipeline Batch Runs & Exports ---

@@ -57,7 +57,4 @@ class StagingSchoolModel(Base):
     updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
     deleted_at = Column(DateTime, nullable=True, index=True)
 
-    __table_args__ = (
-        Index("ix_staging_schools_batch_name", "batch_id", "name"),
-        Index("ix_staging_schools_status", "status"),
-    )
+    __table_args__ = (Index("ix_staging_schools_batch_name", "batch_id", "name"),)

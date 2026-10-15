@@ -138,6 +138,32 @@ class VerificationSchoolItem(BaseModel):
     is_published: bool = False
     production_school_id: str | None = None
     updated_at: str | None = None
+    sandbox_sync: "SandboxSyncInfoSchema | None" = None
+
+
+class SandboxSyncInfoSchema(BaseModel):
+    """Schema for AWS RDS Sandbox sync status metadata."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    status: Literal["synced", "failed", "disabled"]
+    sandbox_id: str | None = None
+    synced_at: str | None = None
+    message: str | None = None
+    error: str | None = None
+
+
+class SandboxSyncStatusResponse(BaseModel):
+    """Response payload for manual retry of RDS Sandbox synchronization."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    school_id: str
+    status: Literal["synced", "failed", "disabled"]
+    sandbox_id: str | None = None
+    synced_at: str | None = None
+    message: str | None = None
+    error: str | None = None
 
 
 class BulkReviewActionRequest(BaseModel):

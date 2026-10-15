@@ -3,10 +3,14 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.core.config import settings
 
-# Configure database engine
+# Configure database engine with safety limits
 # For SQLite, check_same_thread is False to allow FastAPI multi-threading
+# For PostgreSQL, enforce statement_timeout=5000 per DB Safety Rule 3
 db_url = settings.normalized_database_url
-connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
+if db_url.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+else:
+    connect_args = {"options": "-c statement_timeout=5000"}
 
 engine = create_engine(
     db_url,

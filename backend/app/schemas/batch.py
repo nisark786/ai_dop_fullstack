@@ -215,3 +215,16 @@ class BatchDetailResponse(BaseModel):
     batch: BatchSummaryItem
     schools: list[BatchDetailSchoolItem]
     product_matrix: list[ProductProgressItem]
+
+
+class BulkDropSchoolsRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    school_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class BulkDropSchoolsResponse(BaseModel):
+    message: str
+    batch_id: str
+    dropped_count: int
+    remaining_schools: int

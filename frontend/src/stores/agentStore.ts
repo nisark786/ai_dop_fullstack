@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { api } from '../services/api';
 import { formatApiError } from '../services/client';
 import type { AgentRegistryItem, AgentJobSummary, RunAgentsForBatchResponse } from '../types';
+import { useBatchStore } from './batchStore';
 
 interface AgentState {
   registry: AgentRegistryItem[];
@@ -21,8 +22,18 @@ interface AgentState {
   setSelectedAgentKeys: (keys: string[]) => void;
   toggleAgentSelection: (key: string) => void;
   setForceRefresh: (val: boolean) => void;
-  runAgentsForBatch: (batchId: string, agentKeys: string[], force: boolean) => Promise<RunAgentsForBatchResponse | null>;
-  runAgentsForMultipleBatches: (batchIds: string[], agentKeys: string[], force: boolean) => Promise<RunAgentsForBatchResponse[]>;
+  runAgentsForBatch: (
+    batchIds: string[] | string,
+    agentKeys: string[],
+    force: boolean,
+    workers?: number
+  ) => Promise<RunAgentsForBatchResponse | null>;
+  runAgentsForMultipleBatches: (
+    batchIds: string[],
+    agentKeys: string[],
+    force: boolean,
+    workers?: number
+  ) => Promise<RunAgentsForBatchResponse[]>;
   reset: () => void;
 }
 
@@ -92,15 +103,19 @@ export const useAgentStore = create<AgentState>()((set, get) => ({
 
   setForceRefresh: (forceRefresh) => set({ forceRefresh }),
 
-  runAgentsForBatch: async (batchId, agentKeys, force) => {
+  runAgentsForBatch: async (batchIds, agentKeys, force, workers) => {
     set({ isDispatching: true, error: null });
+    const targetIds = Array.isArray(batchIds) ? batchIds : [batchIds];
     try {
       const res = await api.runAgentsForBatch({
-        batch_ids: [batchId],
+        batch_ids: targetIds,
         agent_keys: agentKeys,
         force_refresh: force,
+        workers: workers ?? 2,
       });
-      await get().fetchJobs([batchId]);
+      await get().fetchJobs(targetIds);
+      // Synchronize batch table status immediately
+      useBatchStore.getState().fetchBatches().catch(() => {});
       set({ isDispatching: false });
       return res;
     } catch (err) {
@@ -109,25 +124,9 @@ export const useAgentStore = create<AgentState>()((set, get) => ({
     }
   },
 
-  runAgentsForMultipleBatches: async (batchIds, agentKeys, force) => {
-    set({ isDispatching: true, error: null });
-    const results: RunAgentsForBatchResponse[] = [];
-    try {
-      for (const bId of batchIds) {
-        const res = await api.runAgentsForBatch({
-          batch_ids: [bId],
-          agent_keys: agentKeys,
-          force_refresh: force,
-        });
-        results.push(res);
-      }
-      await get().fetchJobs(batchIds);
-      set({ isDispatching: false });
-      return results;
-    } catch (err) {
-      set({ error: formatApiError(err), isDispatching: false });
-      return results;
-    }
+  runAgentsForMultipleBatches: async (batchIds, agentKeys, force, workers) => {
+    const res = await get().runAgentsForBatch(batchIds, agentKeys, force, workers);
+    return res ? [res] : [];
   },
 
   reset: () => set(initialAgentState),

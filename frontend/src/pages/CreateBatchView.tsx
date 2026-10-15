@@ -12,6 +12,8 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { api } from '../services/api';
+import { useBatchStore } from '../stores/batchStore';
+import { saveBlobAsFile } from '../utils/download';
 import type {
   BatchUploadPreviewResponse,
   BatchConfirmCreateRequest,
@@ -68,6 +70,49 @@ export const CreateBatchView: React.FC = () => {
     setResolutions({});
   };
 
+  const handleSetAllDuplicates = (action: 'link' | 'create') => {
+    if (!preview) return;
+    const updated: Record<number, 'link' | 'create'> = {};
+    preview.rows.forEach((r) => {
+      if (r.potential_duplicate) {
+        updated[r.row_number] = action;
+      }
+    });
+    setResolutions(updated);
+    showNotification(`Set all duplicate matches to "${action === 'link' ? 'Link to Existing' : 'Create New'}".`);
+  };
+
+  const handleDownloadInvalidRows = () => {
+    if (!preview) return;
+    const invalidRows = preview.rows.filter((r) => !r.is_valid);
+    if (invalidRows.length === 0) return;
+
+    const escapeCsv = (val?: string | number | null) => {
+      if (val === undefined || val === null) return '""';
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const headers = ['Row Number', 'School Name', 'Website', 'Address', 'District', 'State', 'Phone', 'Email', 'Errors'];
+    const rows = invalidRows.map((r) => [
+      r.row_number,
+      escapeCsv(r.name),
+      escapeCsv(r.website),
+      escapeCsv(r.address),
+      escapeCsv(r.district),
+      escapeCsv(r.state),
+      escapeCsv(r.phone),
+      escapeCsv(r.email),
+      escapeCsv(r.validation_errors.join('; ')),
+    ].join(','));
+
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const filenameBase = preview.filename ? preview.filename.replace(/\.[^/.]+$/, '') : 'intake';
+    saveBlobAsFile(blob, `${filenameBase}_invalid_rows.csv`);
+    showNotification(`Downloaded ${invalidRows.length} invalid rows.`);
+  };
+
   const handleConfirm = async () => {
     if (!preview || !batchName.trim()) return;
     setIsConfirming(true);
@@ -105,8 +150,15 @@ export const CreateBatchView: React.FC = () => {
           }),
       };
 
-      const result = await api.confirmBatchUpload(payload);
-      navigate(`/batches/${result.batch.id}`);
+      const createBatch = useBatchStore.getState().createBatch;
+      const result = await createBatch(payload);
+      if (result) {
+        navigate(`/batches/${result.batch.id}`);
+      } else {
+        const errorMsg = useBatchStore.getState().error || 'Failed to create batch';
+        showNotification(errorMsg, 'error');
+        setIsConfirming(false);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       showNotification(`Failed to create batch: ${message}`, 'error');
@@ -268,24 +320,59 @@ export const CreateBatchView: React.FC = () => {
       {/* Card 3: Validation preview */}
       {preview && (
         <div className="card">
-          <div className="ch">
-            <span>3. Validation preview</span>
-            <div className="flex items-center gap-2">
-              <span className="chip chip-verified">
-                <CheckCircle className="w-3.5 h-3.5" />
-                {preview.valid_rows_count} verified
-              </span>
+          <div className="ch flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span>3. Validation preview</span>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="chip chip-verified">
+                  <CheckCircle className="w-3.5 h-3.5" />
+                  {preview.valid_rows_count} verified
+                </span>
+                {preview.duplicates_count > 0 && (
+                  <span className="chip chip-review">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    {preview.duplicates_count} needs review
+                  </span>
+                )}
+                {preview.invalid_rows_count > 0 && (
+                  <span className="chip chip-invalid">
+                    <X className="w-3.5 h-3.5" />
+                    {preview.invalid_rows_count} invalid
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap">
               {preview.duplicates_count > 0 && (
-                <span className="chip chip-review">
-                  <AlertTriangle className="w-3.5 h-3.5" />
-                  {preview.duplicates_count} needs review
-                </span>
+                <div className="inline-flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-200">
+                  <span className="text-[11px] font-semibold text-slate-500 px-1">Duplicates:</span>
+                  <button
+                    type="button"
+                    onClick={() => handleSetAllDuplicates('link')}
+                    className="px-2 py-0.5 text-[11px] font-semibold text-blue-700 bg-white hover:bg-blue-50 border border-blue-200 rounded shadow-2xs transition-colors cursor-pointer"
+                  >
+                    Set All: Link
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSetAllDuplicates('create')}
+                    className="px-2 py-0.5 text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded shadow-2xs transition-colors cursor-pointer"
+                  >
+                    Set All: Create
+                  </button>
+                </div>
               )}
+
               {preview.invalid_rows_count > 0 && (
-                <span className="chip chip-invalid">
-                  <X className="w-3.5 h-3.5" />
-                  {preview.invalid_rows_count} invalid
-                </span>
+                <button
+                  type="button"
+                  onClick={handleDownloadInvalidRows}
+                  className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download Invalid Rows (.csv)</span>
+                </button>
               )}
             </div>
           </div>

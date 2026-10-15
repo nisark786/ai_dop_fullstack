@@ -28,7 +28,12 @@ from sqlalchemy.orm import Session
 
 from app.models.batch import BatchModel
 from app.models.staging_school import StagingSchoolModel
-from tests.factories import make_batch, make_school, make_staging_school
+from tests.factories import (
+    make_batch,
+    make_metadata_output,
+    make_school,
+    make_staging_school,
+)
 
 
 class TestListBatches:
@@ -276,6 +281,30 @@ class TestBatchLifecycle:
 
         assert db_session.query(BatchModel).filter(BatchModel.id == b_id).first() is None
 
+    def test_soft_delete_batch_blocked_when_job_active(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """Attempting to soft-delete a batch with running crawl jobs returns HTTP 409 Conflict."""
+        batch = make_batch(db_session, name="Active Job Batch", status="ready")
+        make_staging_school(db_session, batch_id=batch.id, status="running")
+        db_session.flush()
+
+        response = client.delete(f"/api/batches/{batch.id}")
+        assert response.status_code == 409
+        assert "actively running" in response.json()["detail"].lower()
+
+    def test_permanent_delete_batch_blocked_when_job_active(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """Attempting to permanently delete a batch with running crawl jobs returns HTTP 409 Conflict."""
+        batch = make_batch(db_session, name="Perm Delete Active Job Batch", status="processing")
+        make_staging_school(db_session, batch_id=batch.id, status="pending")
+        db_session.flush()
+
+        response = client.delete(f"/api/batches/{batch.id}/permanent")
+        assert response.status_code == 409
+        assert "actively running" in response.json()["detail"].lower()
+
     def test_purge_expired_trash(self, client: TestClient, db_session: Session) -> None:
         """Purges batches in Trash Bucket older than retention threshold."""
         expired_date = datetime.now(UTC) - timedelta(days=45)
@@ -343,9 +372,15 @@ class TestBatchSchoolMembership:
         assert "already a member" in r2.json()["detail"].lower()
 
     def test_drop_school_from_batch_staging(self, client: TestClient, db_session: Session) -> None:
-        """Dropping a school soft-deletes the staging record and updates batch count."""
+        """Dropping a school soft-deletes the staging record, cancels review outputs, and updates batch count."""
         batch = make_batch(db_session, name="Drop Test Batch", school_count=1)
         staging = make_staging_school(db_session, batch_id=batch.id, name="To Drop School")
+        output = make_metadata_output(
+            db_session,
+            staging_school_id=staging.id,
+            batch_id=batch.id,
+            verification_status="needs_review",
+        )
         db_session.flush()
 
         response = client.delete(f"/api/batches/{batch.id}/schools/{staging.id}")
@@ -356,8 +391,45 @@ class TestBatchSchoolMembership:
         db_session.refresh(staging)
         assert staging.deleted_at is not None
 
+        db_session.refresh(output)
+        assert output.verification_status == "cancelled"
+
         db_session.refresh(batch)
         assert batch.school_count == 0
+
+    def test_bulk_drop_schools_from_batch(self, client: TestClient, db_session: Session) -> None:
+        """Bulk-dropping schools soft-deletes multiple staging schools and cancels review outputs atomically."""
+        batch = make_batch(db_session, name="Bulk Drop Batch", school_count=3)
+        s1 = make_staging_school(db_session, batch_id=batch.id, name="Bulk School 1")
+        s2 = make_staging_school(db_session, batch_id=batch.id, name="Bulk School 2")
+        s3 = make_staging_school(db_session, batch_id=batch.id, name="Bulk School 3")
+        o1 = make_metadata_output(
+            db_session,
+            staging_school_id=s1.id,
+            batch_id=batch.id,
+            verification_status="needs_review",
+        )
+        db_session.flush()
+
+        payload = {"school_ids": [str(s1.id), str(s2.id)]}
+        response = client.post(f"/api/batches/{batch.id}/schools/bulk-drop", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["dropped_count"] == 2
+        assert data["remaining_schools"] == 1
+
+        db_session.refresh(s1)
+        db_session.refresh(s2)
+        db_session.refresh(s3)
+        assert s1.deleted_at is not None
+        assert s2.deleted_at is not None
+        assert s3.deleted_at is None
+
+        db_session.refresh(o1)
+        assert o1.verification_status == "cancelled"
+
+        db_session.refresh(batch)
+        assert batch.school_count == 1
 
 
 class TestRunMetadataAgentOnBatch:

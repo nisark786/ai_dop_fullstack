@@ -1,11 +1,13 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
 import { formatApiError } from '../services/client';
+import { useTrashStore } from './trashStore';
 import type {
   BatchSummaryItem,
   BatchDetailResponse,
   BatchUpdateRequest,
   AddBatchSchoolRequest,
+  BatchConfirmCreateRequest,
 } from '../types';
 
 interface BatchState {
@@ -23,8 +25,10 @@ interface BatchState {
   fetchBatchDetail: (id: string) => Promise<BatchDetailResponse | null>;
   updateBatch: (id: string, payload: BatchUpdateRequest) => Promise<boolean>;
   softDeleteBatch: (id: string) => Promise<boolean>;
+  createBatch: (payload: BatchConfirmCreateRequest) => Promise<BatchDetailResponse | null>;
   addSchoolToBatch: (batchId: string, payload: AddBatchSchoolRequest) => Promise<boolean>;
   dropSchoolFromBatch: (batchId: string, schoolId: string) => Promise<boolean>;
+  bulkDropSchoolsFromBatch: (batchId: string, schoolIds: string[]) => Promise<boolean>;
   clearSelectedBatch: () => void;
   reset: () => void;
 }
@@ -103,10 +107,25 @@ export const useBatchStore = create<BatchState>()((set, get) => ({
         selectedBatch: state.selectedBatch?.batch.id === id ? null : state.selectedBatch,
         isSaving: false,
       }));
+      // Invalidate / refresh trash store immediately
+      useTrashStore.getState().fetchTrashBatches();
       return true;
     } catch (err) {
       set({ error: formatApiError(err), isSaving: false });
       return false;
+    }
+  },
+
+  createBatch: async (payload: BatchConfirmCreateRequest) => {
+    set({ isSaving: true, error: null });
+    try {
+      const res = await api.confirmBatchUpload(payload);
+      await get().fetchBatches();
+      set({ isSaving: false });
+      return res;
+    } catch (err) {
+      set({ error: formatApiError(err), isSaving: false });
+      return null;
     }
   },
 
@@ -130,6 +149,24 @@ export const useBatchStore = create<BatchState>()((set, get) => ({
       await api.dropSchoolFromBatch(batchId, schoolId);
       await get().fetchBatchDetail(batchId);
       await get().fetchBatches();
+      // Invalidate / refresh trash store immediately
+      useTrashStore.getState().fetchTrashSchools();
+      set({ isSaving: false });
+      return true;
+    } catch (err) {
+      set({ error: formatApiError(err), isSaving: false });
+      return false;
+    }
+  },
+
+  bulkDropSchoolsFromBatch: async (batchId: string, schoolIds: string[]) => {
+    set({ isSaving: true, error: null });
+    try {
+      await api.bulkDropSchoolsFromBatch(batchId, schoolIds);
+      await get().fetchBatchDetail(batchId);
+      await get().fetchBatches();
+      // Invalidate / refresh trash store immediately
+      useTrashStore.getState().fetchTrashSchools();
       set({ isSaving: false });
       return true;
     } catch (err) {

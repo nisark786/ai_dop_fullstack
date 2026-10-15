@@ -49,7 +49,7 @@ class TestGetAgentRegistry:
 class TestRunAgentsForBatch:
     """Tests for POST /api/agents/run-for-batch."""
 
-    @patch("app.api.routes.batches._run_batch_metadata_worker")
+    @patch("app.api.routes.agents.run_batch_metadata_worker")
     def test_run_agents_single_scope_success(
         self,
         mock_worker: MagicMock,
@@ -81,7 +81,7 @@ class TestRunAgentsForBatch:
 
         mock_worker.assert_called_once()
 
-    @patch("app.api.routes.batches._run_batch_metadata_worker")
+    @patch("app.api.routes.agents.run_batch_metadata_worker")
     def test_run_agents_group_scope_success(
         self,
         mock_worker: MagicMock,
@@ -108,7 +108,7 @@ class TestRunAgentsForBatch:
         assert data["dispatched"][0]["target_count"] == 2
         mock_worker.assert_called_once()
 
-    @patch("app.api.routes.batches._run_batch_metadata_worker")
+    @patch("app.api.routes.agents.run_batch_metadata_worker")
     def test_run_agents_batch_scope_staging_schools(
         self,
         mock_worker: MagicMock,
@@ -135,7 +135,7 @@ class TestRunAgentsForBatch:
         assert len(data["dispatched"]) == 1
         assert data["dispatched"][0]["target_count"] == 3
 
-    @patch("app.api.routes.batches._run_batch_metadata_worker")
+    @patch("app.api.routes.agents.run_batch_metadata_worker")
     def test_run_agents_batch_scope_legacy_batch_schools(
         self,
         mock_worker: MagicMock,
@@ -163,7 +163,7 @@ class TestRunAgentsForBatch:
         assert len(data["dispatched"]) == 1
         assert data["dispatched"][0]["target_count"] == 1
 
-    @patch("app.api.routes.batches._run_batch_metadata_worker")
+    @patch("app.api.routes.agents.run_batch_metadata_worker")
     def test_run_agents_nonexistent_batch_returns_empty_dispatched(
         self,
         mock_worker: MagicMock,
@@ -183,7 +183,7 @@ class TestRunAgentsForBatch:
         assert data["dispatched"] == []
         mock_worker.assert_not_called()
 
-    @patch("app.api.routes.batches._run_batch_metadata_worker")
+    @patch("app.api.routes.agents.run_batch_metadata_worker")
     def test_run_agents_unimplemented_agent_key_skipped(
         self,
         mock_worker: MagicMock,
@@ -372,7 +372,7 @@ class TestJobControlActions:
         response = client.post("/api/agents/jobs/NONEXISTENT-JOB/pause")
         assert response.status_code == 404
 
-    @patch("app.api.routes.batches._run_batch_metadata_worker")
+    @patch("app.api.routes.agents.run_batch_metadata_worker")
     def test_resume_agent_job_success(
         self, mock_worker: MagicMock, client: TestClient, db_session: Session
     ):
@@ -413,3 +413,156 @@ class TestJobControlActions:
         assert batch.status == "ready"
         assert job.status == "Cancelled"
         assert stuck.status == "pending"
+
+    def test_pause_job_affects_only_target_batch(self, client: TestClient, db_session: Session):
+        """Pausing Job A pauses Batch A only, leaving Batch B processing."""
+        batch_a = make_batch(db_session, name="Batch A", status="processing")
+        batch_b = make_batch(db_session, name="Batch B", status="processing")
+        job_a = make_crawl_job(db_session, job_id="JOB-A-PAUSE", status="Running")
+
+        make_staging_school(
+            db_session,
+            batch_id=batch_a.id,
+            name="School A",
+            status="crawling",
+            metadata_json={"products": {"info": {"job_id": job_a.id}}},
+        )
+        make_staging_school(
+            db_session,
+            batch_id=batch_b.id,
+            name="School B",
+            status="crawling",
+            metadata_json={"products": {"info": {"job_id": "JOB-B"}}},
+        )
+        db_session.flush()
+
+        response = client.post(f"/api/agents/jobs/{job_a.id}/pause?batch_id={batch_a.id}")
+        assert response.status_code == 200
+
+        db_session.refresh(batch_a)
+        db_session.refresh(batch_b)
+        assert batch_a.status == "paused"
+        assert batch_b.status == "processing"  # Batch B untouched!
+
+    def test_cancel_job_affects_only_target_batch(self, client: TestClient, db_session: Session):
+        """Canceling Job A resets Batch A only, leaving Batch B processing and untouched."""
+        batch_a = make_batch(db_session, name="Batch A Cancel", status="processing")
+        batch_b = make_batch(db_session, name="Batch B Stay Active", status="processing")
+        job_a = make_crawl_job(db_session, job_id="JOB-A-CANCEL", status="Running")
+
+        school_a = make_staging_school(
+            db_session,
+            batch_id=batch_a.id,
+            name="School A",
+            status="crawling",
+            metadata_json={"products": {"info": {"job_id": job_a.id}}},
+        )
+        school_b = make_staging_school(
+            db_session,
+            batch_id=batch_b.id,
+            name="School B",
+            status="crawling",
+            metadata_json={"products": {"info": {"job_id": "JOB-B"}}},
+        )
+        db_session.flush()
+
+        response = client.post(f"/api/agents/jobs/{job_a.id}/cancel?batch_id={batch_a.id}")
+        assert response.status_code == 200
+
+        db_session.refresh(batch_a)
+        db_session.refresh(batch_b)
+        db_session.refresh(school_a)
+        db_session.refresh(school_b)
+
+        assert batch_a.status == "ready"
+        assert school_a.status == "pending"
+        assert batch_b.status == "processing"  # Batch B unchanged!
+        assert school_b.status == "crawling"  # School B unchanged!
+
+    @patch("app.api.routes.agents.run_batch_metadata_worker")
+    def test_resume_job_targets_exact_batch(
+        self, mock_worker: MagicMock, client: TestClient, db_session: Session
+    ):
+        """Resuming Job A targets Batch A even if Batch B was updated later."""
+        batch_a = make_batch(db_session, name="Batch A Older", status="paused")
+        batch_b = make_batch(db_session, name="Batch B Newer", status="paused")
+        job_a = make_crawl_job(db_session, job_id="JOB-A-RESUME", status="Paused")
+
+        make_staging_school(
+            db_session,
+            batch_id=batch_a.id,
+            name="School A",
+            status="pending",
+            metadata_json={"products": {"info": {"job_id": job_a.id}}},
+        )
+        make_staging_school(
+            db_session,
+            batch_id=batch_b.id,
+            name="School B",
+            status="pending",
+            metadata_json={"products": {"info": {"job_id": "JOB-B"}}},
+        )
+        db_session.flush()
+
+        response = client.post(f"/api/agents/jobs/{job_a.id}/resume?batch_id={batch_a.id}")
+        assert response.status_code == 200
+
+        db_session.refresh(batch_a)
+        db_session.refresh(batch_b)
+        assert batch_a.status == "processing"
+        assert batch_b.status == "paused"  # Batch B unchanged!
+
+    @patch("app.api.routes.batches._run_batch_metadata_worker")
+    def test_run_metadata_agent_skips_dropped_schools(
+        self, mock_worker: MagicMock, client: TestClient, db_session: Session
+    ):
+        """Whole batch scope skips soft-deleted/dropped staging schools."""
+        batch = make_batch(db_session, name="Dropped Schools Batch", status="ready")
+        make_staging_school(db_session, batch_id=batch.id, name="Active School 1")
+        make_staging_school(
+            db_session,
+            batch_id=batch.id,
+            name="Dropped School 2",
+            deleted_at=datetime.now(UTC),
+        )
+        db_session.flush()
+
+        response = client.post(
+            f"/api/batches/{batch.id}/run-metadata-agent",
+            json={"scope": "batch", "force_refresh": False, "workers": 2},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["target_count"] == 1  # Exactly 1 active school, dropped school skipped!
+
+    def test_batch_transitions_to_completed_when_all_schools_verified(self, db_session: Session):
+        """When all staging schools in a batch are verified, worker reconciles batch status to completed."""
+        from sqlalchemy.orm import sessionmaker
+
+        from app.services.agents.batch_agent_worker import run_batch_metadata_worker
+
+        batch = make_batch(db_session, name="All Verified Batch", status="processing")
+        make_staging_school(
+            db_session,
+            batch_id=batch.id,
+            name="School 1",
+            status="verified",
+        )
+        job = make_crawl_job(db_session, job_id="JOB-COMPLETE-TEST", status="Running")
+        db_session.commit()
+
+        test_factory = sessionmaker(bind=db_session.get_bind(), autocommit=False, autoflush=False)
+
+        with patch("app.services.agents.batch_agent_worker.DatabaseSessionFactory", test_factory):
+            # Run worker with 0 remaining schools (empty list)
+            run_batch_metadata_worker(
+                batch_id=str(batch.id),
+                school_ids=[],
+                job_id=job.id,
+                workers=1,
+            )
+
+        db_session.refresh(batch)
+        db_session.refresh(job)
+        assert batch.status == "completed"
+        assert job.status == "Completed"
